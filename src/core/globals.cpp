@@ -61,6 +61,7 @@ std::mutex g_mediaSourceMutex;                     // leaf lock for the two stri
 std::wstring g_preferredMediaSource;               // AUMID the user picked; empty = Auto
 std::wstring g_switchTarget;                       // pending animated switch
 std::wstring g_dockOverrideAumid;                  // temporary pick from the dock; guarded by g_mediaSourceMutex
+std::wstring g_islandPausedAumid;                  // source paused with the island's own button; guarded by g_mediaSourceMutex
 std::atomic<unsigned> g_dockOverrideRev{0};        // bumped on every dock pick / Auto reset
 std::atomic<int> g_switchDir{1};
 std::atomic<unsigned> g_switchSeq{0};

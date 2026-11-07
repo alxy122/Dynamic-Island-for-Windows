@@ -763,6 +763,19 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     if (cmd != -1) {
                         if (cmd == 0) g_skipTriggerPrev.fetch_add(1);
                         else if (cmd == 2) g_skipTriggerNext.fetch_add(1);
+                        if (cmd == 1) {
+                            // Remember a pause done here, so the island can move on to
+                            // another playing app once it collapses (ChooseMediaSourceAumid).
+                            std::wstring aumid;
+                            bool wasPlaying = false;
+                            {
+                                std::lock_guard lock(g_stateMutex);
+                                aumid = g_state.media.sourceAppUserModelId;
+                                wasPlaying = g_state.media.playing;
+                            }
+                            std::lock_guard lock(g_mediaSourceMutex);
+                            g_islandPausedAumid = wasPlaying ? aumid : std::wstring();
+                        }
                         g_layoutDirty = true;
                         SendMediaTransportCommand(cmd);
                         return 0;
