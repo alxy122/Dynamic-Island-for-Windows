@@ -437,6 +437,7 @@ void LoadSettings() {
     next.expandOnHover = localExpandOnHover >= 0 ? (localExpandOnHover != 0) : (Wh_GetIntSetting(L"Behavior.ExpandOnHover") != 0);
     // Right-click toggle; stored with Wh_SetIntValue so it survives restarts.
     next.collapsedLyrics = Wh_GetIntValue(L"CollapsedLyrics", 0) != 0;
+    next.mediaPillInfo = Wh_GetIntSetting(L"Modules.MediaPillInfo") != 0;
     next.lyricsPinnedFirst = Wh_GetIntValue(L"LyricsPinnedFirst", 0) != 0;
     {
         // Right-click choice wins until the Mod Settings value is changed.

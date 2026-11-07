@@ -118,9 +118,17 @@ struct SwapTextState {
     MarqueeLayoutCache prevCache;     // layout cache for the outgoing text
 };
 
+// One reading in the info section of the collapsed media pill (clock, weather).
+struct MediaPillSlot {
+    std::wstring text;
+    float width = 0.0f;      // measured in the widest-digit form
+    bool colorFont = false;  // contains an emoji
+};
+
 struct MediaPillMetrics {
-    float clockWidth = 0.0f;
-    float sectionWidth = 0.0f;                       // clock + divider block on the left
+    std::vector<MediaPillSlot> slots;                // left to right, each followed by a divider
+    float sectionWidth = 0.0f;                       // slots + dividers block on the left
+    bool showArt = true;                             // false: no cover on the collapsed pill
     float totalWidth = MediaPillLayout::kBaseWidth;  // content space, before sizeScale
 };
 
@@ -145,12 +153,43 @@ std::wstring WidestDigitForm(std::wstring text) {
 // Width of the collapsed media pill while it carries a lyric line (content px).
 constexpr float kCollapsedLyricsWidth = 320.0f;
 
-// True when the collapsed pill should be widened for lyrics. "fetching" counts
-// too, so the pill does not shrink and regrow on every track change.
+// Synced lyrics that belong to the track playing right now (same test as
+// DrawCollapsedLyrics uses before it shows a lyric line).
+bool CollapsedLyricsUsable(const SharedState& state) {
+    return state.lyrics.hasData && state.lyrics.synced && !state.lyrics.lines.empty() &&
+           state.lyrics.matchedTitle == state.media.title &&
+           state.lyrics.matchedArtist == state.media.artist;
+}
+
+// Did the last track that was decided either way have lyrics? Bridges the
+// look-up after a track change, see CollapsedLyricsActive. Render thread only.
+std::atomic<bool> g_collapsedLyricsLastHad{false};
+
+// True when the collapsed pill should be widened for lyrics.
+//
+// Only while there really are synced lyrics for the current track. A browser
+// stream, a video or a podcast has none, and used to get a 320px pill that just
+// repeated the page title while the clock, weather and the rest were hidden.
+// While the lyrics thread is still looking up a new track, the pill keeps the
+// width the previous track had, so an album does not shrink and regrow at every
+// song change, and a video does not flash wide for a second.
 bool CollapsedLyricsActive(const SharedState& state, const Settings& settings) {
-    // Stays wide for as long as media is available. If there are no lyrics to
-    // show, DrawCollapsedLyrics shows the media title instead.
-    return settings.collapsedLyrics && MediaVisible(state, settings);
+    if (!settings.collapsedLyrics || !MediaVisible(state, settings)) {
+        return false;
+    }
+    if (CollapsedLyricsUsable(state)) {
+        g_collapsedLyricsLastHad.store(true, std::memory_order_relaxed);
+        return true;
+    }
+    const bool forThisTrack = state.lyrics.matchedTitle == state.media.title &&
+                              state.lyrics.matchedArtist == state.media.artist;
+    if (forThisTrack && !state.lyrics.fetching) {
+        // Decided: not found, unsynced, or the request gave up.
+        g_collapsedLyricsLastHad.store(false, std::memory_order_relaxed);
+        return false;
+    }
+    // Still looking (or the lyrics thread has not seen the new track yet).
+    return g_collapsedLyricsLastHad.load(std::memory_order_relaxed);
 }
 
 // One pre-built lyric line. Built once when the line changes, then reused every

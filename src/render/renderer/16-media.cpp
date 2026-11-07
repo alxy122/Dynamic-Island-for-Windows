@@ -88,8 +88,11 @@
             artBadgeAlpha_ = 0.0f;
         }
         float pillClockSection = 0.0f;
-        if (settings.mediaPillClock && idleTextFormat_) {
-            pillClockSection = MeasureMediaPill(state, settings).sectionWidth;
+        bool pillShowArt = true;
+        {
+            const MediaPillMetrics pill = MeasureMediaPill(state, settings);
+            pillClockSection = pill.sectionWidth;
+            pillShowArt = pill.showArt;
         }
         const D2D1_RECT_F collapsedArtRect = D2D1::RectF(
             rect.left + pillClockSection + kCollapsedArtPad, rect.top + kCollapsedArtPad,
@@ -423,10 +426,10 @@
 
             const float cy = (rect.top + rect.bottom) * 0.5f;
 
-            // Optional clock section on the left. Zero wide when the option is
-            // off, so the cover sits exactly where it always did.
+            // Optional info section on the left (clock, weather). Zero wide when
+            // there is nothing to show, so the cover sits exactly where it always did.
             MediaPillMetrics pillMetrics;
-            if (settings.mediaPillClock && idleTextFormat_) {
+            if (idleTextFormat_) {
                 pillMetrics = MeasureMediaPill(state, settings);
             }
             const float clockSection = pillMetrics.sectionWidth;
@@ -470,35 +473,37 @@
                 }
             }
 
-            // Clock + divider on the left, same face, size and time format as the
-            // idle strip. On hover the collapsed layer fades out and the normal
-            // player shows.
-            if (clockSection > 0.0f) {
-                SYSTEMTIME local = {};
-                GetLocalTime(&local);
-                const std::wstring clockText = FormatIslandTime(local, settings.clockFollowSystem,
-                                                                settings.use24HourClock,
-                                                                settings.showSeconds);
-                const float clockLeft = rect.left + MediaPillLayout::kClockPadLeft;
-                textBrush_->SetOpacity(0.96f);
-                target_->DrawTextW(clockText.c_str(), static_cast<UINT32>(clockText.size()),
-                                   idleTextFormat_.Get(),
-                                   D2D1::RectF(clockLeft, rect.top, clockLeft + pillMetrics.clockWidth, rect.bottom),
-                                   textBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_NONE);
-                textBrush_->SetOpacity(1.0f);
-
+            // Info slots on the left (clock, weather), each followed by a divider,
+            // same face, size and formats as the idle strip. On hover the collapsed
+            // layer fades out and the normal player shows.
+            if (clockSection > 0.0f && !pillMetrics.slots.empty()) {
                 ComPtr<ID2D1SolidColorBrush> divider;
                 target_->CreateSolidColorBrush(
                     WithAlpha(material_.hairline, material_.hairline.a * settingsOpacity_), &divider);
-                if (divider) {
-                    const float divX = clockLeft + pillMetrics.clockWidth + MediaPillLayout::kSlotGap;
-                    const float divW = MediaPillLayout::kDividerWidth;
-                    target_->FillRoundedRectangle(
-                        D2D1::RoundedRect(D2D1::RectF(divX, rect.top + MediaPillLayout::kDividerInsetY,
-                                                      divX + divW, rect.bottom - MediaPillLayout::kDividerInsetY),
-                                          divW * 0.5f, divW * 0.5f),
-                        divider.Get());
+
+                float slotX = rect.left + MediaPillLayout::kClockPadLeft;
+                textBrush_->SetOpacity(0.96f);
+                for (size_t i = 0; i < pillMetrics.slots.size(); ++i) {
+                    const MediaPillSlot& slot = pillMetrics.slots[i];
+                    if (i > 0) slotX += MediaPillLayout::kSlotGap;
+                    target_->DrawTextW(slot.text.c_str(), static_cast<UINT32>(slot.text.size()),
+                                       idleTextFormat_.Get(),
+                                       D2D1::RectF(slotX, rect.top, slotX + slot.width, rect.bottom),
+                                       textBrush_.Get(),
+                                       slot.colorFont ? D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT
+                                                      : D2D1_DRAW_TEXT_OPTIONS_NONE);
+                    slotX += slot.width + MediaPillLayout::kSlotGap;
+                    if (divider) {
+                        const float divW = MediaPillLayout::kDividerWidth;
+                        target_->FillRoundedRectangle(
+                            D2D1::RoundedRect(D2D1::RectF(slotX, rect.top + MediaPillLayout::kDividerInsetY,
+                                                          slotX + divW, rect.bottom - MediaPillLayout::kDividerInsetY),
+                                              divW * 0.5f, divW * 0.5f),
+                            divider.Get());
+                    }
+                    slotX += MediaPillLayout::kDividerWidth;
                 }
+                textBrush_->SetOpacity(1.0f);
             }
 
             target_->PopLayer();
@@ -554,7 +559,9 @@
                 artDrawRect = D2D1::RectF(ncx - hw, ncy - hh, ncx + hw, ncy + hh);
                 artDrawRadius = artBaseRadius * hideS;
             }
-            const float artAlphaEff = artOuterAlpha_ * hideS;
+            // A collapsed pill without a cover (browser, or the small second pill)
+            // shows no placeholder; it only fades in as the island opens.
+            const float artAlphaEff = artOuterAlpha_ * hideS * (pillShowArt ? 1.0f : artMorph);
 
             if (artMorph < 1.0f && artAlphaEff > 0.01f) {
                 ID2D1Layer* artLayer = (artAlphaEff < 0.99f) ? AcquireLayer() : nullptr;

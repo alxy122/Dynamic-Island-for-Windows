@@ -147,11 +147,13 @@ class Renderer {
                 DrawPill(state, settings, primary,
                          D2D1::RectF(left, pTop, left + primary.width, pTop + primary.height),
                          scale, now);
+                drawingSecondary_ = true;
                 DrawPill(state, settings, *secondary,
                          D2D1::RectF(left + primary.width + gap, sTop,
                                       left + primary.width + gap + secondary->width,
                                       sTop + secondary->height),
                          scale, now);
+                drawingSecondary_ = false;
             } else {
                 DrawPill(state, settings, primary,
                          D2D1::RectF(left, top, left + width, top + height), scale, now);
@@ -357,29 +359,86 @@ class Renderer {
     // sizes; the render loop multiplies by sizeScale like every other collapsed
     // width. Measured in the widest-digit form so the width does not wobble as
     // the digits change.
+    //
+    // Which readings go on the left:
+    //  - no lyric line on screen and MediaPillInfo on: clock and weather, the same
+    //    readings as the idle strip, so playing a video does not hide them;
+    //  - otherwise, with MediaPillClock on: the clock alone (room for the lyrics);
+    //  - otherwise nothing, and the pill is exactly the old 150px.
+    // As the second, small pill next to a notification it shows the sound waves
+    // only (no readings, no cover), see drawingSecondary_.
     MediaPillMetrics MeasureMediaPill(const SharedState& state, const Settings& settings) {
-        (void)state;
         MediaPillMetrics metrics;
-        if (!settings.mediaPillClock) {
+        const float privacyShift = (state.system.micActive || state.system.cameraActive)
+                                       ? MediaPillLayout::kPrivacyShift : 0.0f;
+        if (drawingSecondary_) {
+            metrics.showArt = false;
+            metrics.totalWidth = MediaPillLayout::kWavesOnlyWidth + privacyShift;
+            return metrics;
+        }
+        const bool infoMode = settings.mediaPillInfo && !CollapsedLyricsActive(state, settings);
+        if (!infoMode && !settings.mediaPillClock) {
             return metrics;
         }
 
         EnsureTextFormats(settings.sizeScale, settings.fontFamily, settings.textScale);
         IDWriteTextFormat* fmt = idleTextFormat_ ? idleTextFormat_.Get() : smallTextFormat_.Get();
 
+        // The idle strip is never on screen together with the media pill, and the
+        // caches are keyed on the text, so sharing them costs nothing.
         SYSTEMTIME local = {};
         GetLocalTime(&local);
-        const std::wstring clock = FormatIslandTime(local, settings.clockFollowSystem,
-                                                    settings.use24HourClock, settings.showSeconds);
-        metrics.clockWidth =
-            MeasureTextWidthCached(WidestDigitForm(clock), fmt, idleClockWidthCache_);
+        MediaPillSlot clock;
+        clock.text = FormatIslandTime(local, settings.clockFollowSystem,
+                                      settings.use24HourClock, settings.showSeconds);
+        clock.width = MeasureTextWidthCached(WidestDigitForm(clock.text), fmt, idleClockWidthCache_);
+        metrics.slots.push_back(std::move(clock));
 
-        float section = MediaPillLayout::kClockPadLeft + metrics.clockWidth +
-                        MediaPillLayout::kSlotGap + MediaPillLayout::kDividerWidth;
+        if (infoMode && settings.weather) {
+            MediaPillSlot weather;
+            weather.text = IdleWeatherLabel(state, NowSeconds());
+            weather.width = MeasureTextWidthCached(WidestDigitForm(weather.text), fmt, idleWeatherWidthCache_);
+            weather.colorFont = true;
+            metrics.slots.push_back(std::move(weather));
+        }
+
+        float section = MediaPillLayout::kClockPadLeft;
+        for (size_t i = 0; i < metrics.slots.size(); ++i) {
+            if (i > 0) section += MediaPillLayout::kSlotGap;
+            section += metrics.slots[i].width + MediaPillLayout::kSlotGap + MediaPillLayout::kDividerWidth;
+        }
         section = std::ceil(section / MediaPillLayout::kWidthQuantum) * MediaPillLayout::kWidthQuantum;
         metrics.sectionWidth = section;
-        metrics.totalWidth = MediaPillLayout::kBaseWidth + section;
+        if (infoMode) {
+            // No title here: only the cover (if the player has one) and the waves.
+            // A browser usually sends no cover, and the placeholder just looked odd.
+            metrics.showArt = static_cast<bool>(state.media.art);
+            metrics.totalWidth = section + privacyShift +
+                                 (metrics.showArt ? MediaPillLayout::kInfoArtWidth
+                                                  : MediaPillLayout::kInfoWavesWidth);
+        } else {
+            metrics.totalWidth = MediaPillLayout::kBaseWidth + section;
+        }
         return metrics;
+    }
+
+    // Set by DrawPill while it paints the second pill of a split layout.
+    bool drawingSecondary_ = false;
+
+    // "☀️ 12°", or the placeholder while there is no fresh reading. Same text as
+    // the idle strip shows.
+    std::wstring IdleWeatherLabel(const SharedState& state, double now) {
+        const bool hasData = state.weather.hasData && (now - state.weather.lastUpdated < 3600.0);
+        wchar_t label[32] = {};
+        if (hasData) {
+            std::wstring icon = L"\U0001F321️";
+            std::wstring desc = state.weather.weatherDesc;
+            GetWeatherIconAndText(state.weather.weatherCode, icon, desc);
+            swprintf_s(label, L"%s %.0f\x00B0", icon.c_str(), state.weather.temperature);
+        } else {
+            wcscpy_s(label, ARRAYSIZE(label), L"\U0001F321️ --\x00B0");
+        }
+        return label;
     }
 
    private:

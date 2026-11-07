@@ -227,6 +227,16 @@ namespace IdleStripLayout {
 // is 0 wide and the pill is exactly the old 150px.
 namespace MediaPillLayout {
     constexpr float kBaseWidth = 150.0f;    // same as ActivityForKind's Media width
+    // With the info slots (MediaPillInfo) there is no title in the pill, so the
+    // part right of the slots is only as wide as what it holds: cover (6+32),
+    // a 10px gap and the 28px sound waves with their 14px right margin ...
+    constexpr float kInfoArtWidth = 90.0f;
+    // ... or, when the player has no cover (typical for a browser), the waves alone.
+    constexpr float kInfoWavesWidth = 52.0f;
+    // Media as the second, small pill next to a notification: sound waves only.
+    constexpr float kWavesOnlyWidth = 56.0f;
+    // The waves move left by this much while a privacy dot is shown.
+    constexpr float kPrivacyShift = 22.0f;
     constexpr float kClockPadLeft = 14.0f;  // left edge -> clock text
     constexpr float kSlotGap = 9.0f;        // clock text -> divider
     constexpr float kDividerWidth = 1.0f;

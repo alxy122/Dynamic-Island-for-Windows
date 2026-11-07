@@ -259,6 +259,7 @@ struct Settings {
     int lyricsOffsetMs = 0;      // Modules.LyricsOffsetMs, speakers / wired, ms
     int lyricsOffsetBtMs = 0;    // Modules.LyricsOffsetBluetoothMs, Bluetooth output, ms
     bool collapsedLyrics = false;  // lyrics inside the collapsed media pill (right-click toggle)
+    bool mediaPillInfo = true;     // Modules.MediaPillInfo: clock + weather in the pill when no lyric line is shown
     bool lyricsPinnedFirst = false;  // Lyrics tab is the first tab of the expanded media view (right-click toggle)
     bool lyricsCache = true;       // Modules.LyricsCache
     int lyricsCacheMaxMB = 25;     // Modules.LyricsCacheMaxMB; 0 = disk cache off
