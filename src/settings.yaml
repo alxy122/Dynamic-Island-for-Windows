@@ -319,9 +319,21 @@
   - Appointments: false
     $name: Next appointment (Google Calendar)
     $description: "Shows your next appointment of the day. Collapsed island: a calendar icon with a countdown (<5h ... <1m, now). Start page: a line under the date with the time and title. Needs at least one calendar feed below."
-  - AppointmentCalendars: [""]
-    $name: Calendar feeds (secret iCal addresses)
-    $description: "One entry per calendar, written as Name|#RRGGBB|URL. Name and colour are optional, the bare URL works too. In Google Calendar open the calendar's settings and copy 'Secret address in iCal format'. Treat that URL like a password. Up to 8 calendars."
+  - AppointmentFeeds:
+    - - Name: ""
+        $name: Name
+        $description: Shown for this calendar, so several feeds stay apart. Leave empty for "Calendar 1", "Calendar 2" and so on.
+      - Enabled: true
+        $name: Enabled
+        $description: Turn off to hide this calendar without deleting its address.
+      - Color: ""
+        $name: Colour (optional)
+        $description: "Hex colour like #4285F4 for the bar next to its appointments. Leave empty for an automatic colour."
+      - Url: ""
+        $name: Secret iCal address
+        $description: "In Google Calendar open the calendar's settings and copy 'Secret address in iCal format'. Treat it like a password."
+    $name: Calendar feeds
+    $description: "One entry per calendar, up to 8. Give each one a name, and switch a calendar off to hide it without losing its address."
   - MediaTabLyrics: false
     $name: Lyrics in the media tab
     $description: Adds a lyrics button to the media player controls to toggle an immersive lyrics view over the media tab. Can also be toggled from the right-click menu.
