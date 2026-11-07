@@ -568,7 +568,8 @@ DWORD WINAPI RenderThreadProc(void*) {
                 // (Immersive lyrics: the island keeps its normal 380px width.)
             } else {
                 // Optional info section (clock, weather) on the left of the collapsed pill.
-                const float clockSection = renderer.MeasureMediaPill(snapshot, g_settings).sectionWidth;
+                const MediaPillMetrics pill = renderer.MeasureMediaPill(snapshot, g_settings);
+                const float clockSection = pill.sectionWidth;
                 // The lyrics thread only works while lyrics are on screen. The
                 // pill now stays narrow until lyrics are found, so keep it looking
                 // for as long as the collapsed pill could show them.
@@ -579,9 +580,16 @@ DWORD WINAPI RenderThreadProc(void*) {
                     // Collapsed but carrying lyrics: wider pill, same height.
                     primary.width = (kCollapsedLyricsWidth + clockSection) * g_settings.sizeScale;
                 } else if (clockSection > 0.0f) {
-                    primary.width = (MediaPillLayout::kBaseWidth + clockSection) * g_settings.sizeScale;
+                    primary.width = pill.totalWidth * g_settings.sizeScale;
                 }
             }
+        }
+
+        // Media as the second pill next to a notification: just the sound waves.
+        if (secondary && secondary->kind == IslandKind::Media) {
+            const bool privacy = snapshot.system.micActive || snapshot.system.cameraActive;
+            secondary->width = (MediaPillLayout::kWavesOnlyWidth +
+                                (privacy ? MediaPillLayout::kPrivacyShift : 0.0f)) * g_settings.sizeScale;
         }
 
         if (primary.kind == IslandKind::SongId) {

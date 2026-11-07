@@ -147,11 +147,13 @@ class Renderer {
                 DrawPill(state, settings, primary,
                          D2D1::RectF(left, pTop, left + primary.width, pTop + primary.height),
                          scale, now);
+                drawingSecondary_ = true;
                 DrawPill(state, settings, *secondary,
                          D2D1::RectF(left + primary.width + gap, sTop,
                                       left + primary.width + gap + secondary->width,
                                       sTop + secondary->height),
                          scale, now);
+                drawingSecondary_ = false;
             } else {
                 DrawPill(state, settings, primary,
                          D2D1::RectF(left, top, left + width, top + height), scale, now);
@@ -345,8 +347,17 @@ class Renderer {
     //    readings as the idle strip, so playing a video does not hide them;
     //  - otherwise, with MediaPillClock on: the clock alone (room for the lyrics);
     //  - otherwise nothing, and the pill is exactly the old 150px.
+    // As the second, small pill next to a notification it shows the sound waves
+    // only (no readings, no cover), see drawingSecondary_.
     MediaPillMetrics MeasureMediaPill(const SharedState& state, const Settings& settings) {
         MediaPillMetrics metrics;
+        const float privacyShift = (state.system.micActive || state.system.cameraActive)
+                                       ? MediaPillLayout::kPrivacyShift : 0.0f;
+        if (drawingSecondary_) {
+            metrics.showArt = false;
+            metrics.totalWidth = MediaPillLayout::kWavesOnlyWidth + privacyShift;
+            return metrics;
+        }
         const bool infoMode = settings.mediaPillInfo && !CollapsedLyricsActive(state, settings);
         if (!infoMode && !settings.mediaPillClock) {
             return metrics;
@@ -380,9 +391,21 @@ class Renderer {
         }
         section = std::ceil(section / MediaPillLayout::kWidthQuantum) * MediaPillLayout::kWidthQuantum;
         metrics.sectionWidth = section;
-        metrics.totalWidth = MediaPillLayout::kBaseWidth + section;
+        if (infoMode) {
+            // No title here: only the cover (if the player has one) and the waves.
+            // A browser usually sends no cover, and the placeholder just looked odd.
+            metrics.showArt = static_cast<bool>(state.media.art);
+            metrics.totalWidth = section + privacyShift +
+                                 (metrics.showArt ? MediaPillLayout::kInfoArtWidth
+                                                  : MediaPillLayout::kInfoWavesWidth);
+        } else {
+            metrics.totalWidth = MediaPillLayout::kBaseWidth + section;
+        }
         return metrics;
     }
+
+    // Set by DrawPill while it paints the second pill of a split layout.
+    bool drawingSecondary_ = false;
 
     // "☀️ 12°", or the placeholder while there is no fresh reading. Same text as
     // the idle strip shows.

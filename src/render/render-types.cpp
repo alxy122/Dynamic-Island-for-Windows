@@ -125,6 +125,7 @@ struct MediaPillSlot {
 struct MediaPillMetrics {
     std::vector<MediaPillSlot> slots;                // left to right, each followed by a divider
     float sectionWidth = 0.0f;                       // slots + dividers block on the left
+    bool showArt = true;                             // false: no cover on the collapsed pill
     float totalWidth = MediaPillLayout::kBaseWidth;  // content space, before sizeScale
 };
 

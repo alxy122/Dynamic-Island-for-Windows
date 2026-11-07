@@ -920,6 +920,16 @@ namespace IdleStripLayout {
 // is 0 wide and the pill is exactly the old 150px.
 namespace MediaPillLayout {
     constexpr float kBaseWidth = 150.0f;    // same as ActivityForKind's Media width
+    // With the info slots (MediaPillInfo) there is no title in the pill, so the
+    // part right of the slots is only as wide as what it holds: cover (6+32),
+    // a 10px gap and the 28px sound waves with their 14px right margin ...
+    constexpr float kInfoArtWidth = 90.0f;
+    // ... or, when the player has no cover (typical for a browser), the waves alone.
+    constexpr float kInfoWavesWidth = 52.0f;
+    // Media as the second, small pill next to a notification: sound waves only.
+    constexpr float kWavesOnlyWidth = 56.0f;
+    // The waves move left by this much while a privacy dot is shown.
+    constexpr float kPrivacyShift = 22.0f;
     constexpr float kClockPadLeft = 14.0f;  // left edge -> clock text
     constexpr float kSlotGap = 9.0f;        // clock text -> divider
     constexpr float kDividerWidth = 1.0f;
@@ -12948,6 +12958,7 @@ struct MediaPillSlot {
 struct MediaPillMetrics {
     std::vector<MediaPillSlot> slots;                // left to right, each followed by a divider
     float sectionWidth = 0.0f;                       // slots + dividers block on the left
+    bool showArt = true;                             // false: no cover on the collapsed pill
     float totalWidth = MediaPillLayout::kBaseWidth;  // content space, before sizeScale
 };
 
@@ -13170,11 +13181,13 @@ class Renderer {
                 DrawPill(state, settings, primary,
                          D2D1::RectF(left, pTop, left + primary.width, pTop + primary.height),
                          scale, now);
+                drawingSecondary_ = true;
                 DrawPill(state, settings, *secondary,
                          D2D1::RectF(left + primary.width + gap, sTop,
                                       left + primary.width + gap + secondary->width,
                                       sTop + secondary->height),
                          scale, now);
+                drawingSecondary_ = false;
             } else {
                 DrawPill(state, settings, primary,
                          D2D1::RectF(left, top, left + width, top + height), scale, now);
@@ -13368,8 +13381,17 @@ class Renderer {
     //    readings as the idle strip, so playing a video does not hide them;
     //  - otherwise, with MediaPillClock on: the clock alone (room for the lyrics);
     //  - otherwise nothing, and the pill is exactly the old 150px.
+    // As the second, small pill next to a notification it shows the sound waves
+    // only (no readings, no cover), see drawingSecondary_.
     MediaPillMetrics MeasureMediaPill(const SharedState& state, const Settings& settings) {
         MediaPillMetrics metrics;
+        const float privacyShift = (state.system.micActive || state.system.cameraActive)
+                                       ? MediaPillLayout::kPrivacyShift : 0.0f;
+        if (drawingSecondary_) {
+            metrics.showArt = false;
+            metrics.totalWidth = MediaPillLayout::kWavesOnlyWidth + privacyShift;
+            return metrics;
+        }
         const bool infoMode = settings.mediaPillInfo && !CollapsedLyricsActive(state, settings);
         if (!infoMode && !settings.mediaPillClock) {
             return metrics;
@@ -13403,9 +13425,21 @@ class Renderer {
         }
         section = std::ceil(section / MediaPillLayout::kWidthQuantum) * MediaPillLayout::kWidthQuantum;
         metrics.sectionWidth = section;
-        metrics.totalWidth = MediaPillLayout::kBaseWidth + section;
+        if (infoMode) {
+            // No title here: only the cover (if the player has one) and the waves.
+            // A browser usually sends no cover, and the placeholder just looked odd.
+            metrics.showArt = static_cast<bool>(state.media.art);
+            metrics.totalWidth = section + privacyShift +
+                                 (metrics.showArt ? MediaPillLayout::kInfoArtWidth
+                                                  : MediaPillLayout::kInfoWavesWidth);
+        } else {
+            metrics.totalWidth = MediaPillLayout::kBaseWidth + section;
+        }
         return metrics;
     }
+
+    // Set by DrawPill while it paints the second pill of a split layout.
+    bool drawingSecondary_ = false;
 
     // "☀️ 12°", or the placeholder while there is no fresh reading. Same text as
     // the idle strip shows.
@@ -17201,8 +17235,11 @@ class Renderer {
             artBadgeAlpha_ = 0.0f;
         }
         float pillClockSection = 0.0f;
-        if (idleTextFormat_) {
-            pillClockSection = MeasureMediaPill(state, settings).sectionWidth;
+        bool pillShowArt = true;
+        {
+            const MediaPillMetrics pill = MeasureMediaPill(state, settings);
+            pillClockSection = pill.sectionWidth;
+            pillShowArt = pill.showArt;
         }
         const D2D1_RECT_F collapsedArtRect = D2D1::RectF(
             rect.left + pillClockSection + kCollapsedArtPad, rect.top + kCollapsedArtPad,
@@ -17657,7 +17694,9 @@ class Renderer {
                 artDrawRect = D2D1::RectF(ncx - hw, ncy - hh, ncx + hw, ncy + hh);
                 artDrawRadius = artBaseRadius * hideS;
             }
-            const float artAlphaEff = artOuterAlpha_ * hideS;
+            // A collapsed pill without a cover (browser, or the small second pill)
+            // shows no placeholder; it only fades in as the island opens.
+            const float artAlphaEff = artOuterAlpha_ * hideS * (pillShowArt ? 1.0f : artMorph);
 
             if (artMorph < 1.0f && artAlphaEff > 0.01f) {
                 ID2D1Layer* artLayer = (artAlphaEff < 0.99f) ? AcquireLayer() : nullptr;
@@ -20362,10 +20401,17 @@ class Renderer {
                                                   rect.right - 11, rect.bottom - 11);
                 DrawBitmapPixels(*media.sourceIcon, iconRect, mediaSourceIconBitmap_,
                                  mediaSourceIconGeneration_, 0.95f);
-            } else {
+            } else if (textFormat_) {
+                // Centred in the placeholder (it used to sit in the top left corner).
+                const DWRITE_TEXT_ALIGNMENT oldAlign = textFormat_->GetTextAlignment();
+                const DWRITE_PARAGRAPH_ALIGNMENT oldPara = textFormat_->GetParagraphAlignment();
+                textFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+                textFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
                 target_->DrawTextW(media.sourceBadge.empty() ? L"\u25b6" : media.sourceBadge.c_str(),
                                    static_cast<UINT32>(media.sourceBadge.empty() ? 1 : media.sourceBadge.size()),
                                    textFormat_.Get(), rect, textBrush_.Get());
+                textFormat_->SetTextAlignment(oldAlign);
+                textFormat_->SetParagraphAlignment(oldPara);
             }
         }
 
@@ -25115,7 +25161,8 @@ DWORD WINAPI RenderThreadProc(void*) {
                 // (Immersive lyrics: the island keeps its normal 380px width.)
             } else {
                 // Optional info section (clock, weather) on the left of the collapsed pill.
-                const float clockSection = renderer.MeasureMediaPill(snapshot, g_settings).sectionWidth;
+                const MediaPillMetrics pill = renderer.MeasureMediaPill(snapshot, g_settings);
+                const float clockSection = pill.sectionWidth;
                 // The lyrics thread only works while lyrics are on screen. The
                 // pill now stays narrow until lyrics are found, so keep it looking
                 // for as long as the collapsed pill could show them.
@@ -25126,9 +25173,16 @@ DWORD WINAPI RenderThreadProc(void*) {
                     // Collapsed but carrying lyrics: wider pill, same height.
                     primary.width = (kCollapsedLyricsWidth + clockSection) * g_settings.sizeScale;
                 } else if (clockSection > 0.0f) {
-                    primary.width = (MediaPillLayout::kBaseWidth + clockSection) * g_settings.sizeScale;
+                    primary.width = pill.totalWidth * g_settings.sizeScale;
                 }
             }
+        }
+
+        // Media as the second pill next to a notification: just the sound waves.
+        if (secondary && secondary->kind == IslandKind::Media) {
+            const bool privacy = snapshot.system.micActive || snapshot.system.cameraActive;
+            secondary->width = (MediaPillLayout::kWavesOnlyWidth +
+                                (privacy ? MediaPillLayout::kPrivacyShift : 0.0f)) * g_settings.sizeScale;
         }
 
         if (primary.kind == IslandKind::SongId) {

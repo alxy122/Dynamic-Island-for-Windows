@@ -88,8 +88,11 @@
             artBadgeAlpha_ = 0.0f;
         }
         float pillClockSection = 0.0f;
-        if (idleTextFormat_) {
-            pillClockSection = MeasureMediaPill(state, settings).sectionWidth;
+        bool pillShowArt = true;
+        {
+            const MediaPillMetrics pill = MeasureMediaPill(state, settings);
+            pillClockSection = pill.sectionWidth;
+            pillShowArt = pill.showArt;
         }
         const D2D1_RECT_F collapsedArtRect = D2D1::RectF(
             rect.left + pillClockSection + kCollapsedArtPad, rect.top + kCollapsedArtPad,
@@ -544,7 +547,9 @@
                 artDrawRect = D2D1::RectF(ncx - hw, ncy - hh, ncx + hw, ncy + hh);
                 artDrawRadius = artBaseRadius * hideS;
             }
-            const float artAlphaEff = artOuterAlpha_ * hideS;
+            // A collapsed pill without a cover (browser, or the small second pill)
+            // shows no placeholder; it only fades in as the island opens.
+            const float artAlphaEff = artOuterAlpha_ * hideS * (pillShowArt ? 1.0f : artMorph);
 
             if (artMorph < 1.0f && artAlphaEff > 0.01f) {
                 ID2D1Layer* artLayer = (artAlphaEff < 0.99f) ? AcquireLayer() : nullptr;
