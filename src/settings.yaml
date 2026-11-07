@@ -316,6 +316,12 @@
   - WeatherFahrenheit: false
     $name: Use Fahrenheit
     $description: Display weather temperature and wind speed in imperial units.
+  - Appointments: false
+    $name: Next appointment (Google Calendar)
+    $description: "Shows your next appointment of the day. Collapsed island: a calendar icon with a countdown (<5h ... <1m, now). Start page: a line under the date with the time and title. Needs at least one calendar feed below."
+  - AppointmentCalendars: [""]
+    $name: Calendar feeds (secret iCal addresses)
+    $description: "One entry per calendar, written as Name|#RRGGBB|URL. Name and colour are optional, the bare URL works too. In Google Calendar open the calendar's settings and copy 'Secret address in iCal format'. Treat that URL like a password. Up to 8 calendars."
   - MediaTabLyrics: false
     $name: Lyrics in the media tab
     $description: Adds a lyrics button to the media player controls to toggle an immersive lyrics view over the media tab. Can also be toggled from the right-click menu.

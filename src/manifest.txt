@@ -27,6 +27,8 @@ system/bluetooth.cpp
 media/audio-spectrum.cpp
 services/http.cpp
 services/weather.cpp
+services/appointments-ics.cpp
+services/appointments.cpp
 lyrics/lyrics-fetch.cpp
 lyrics/lyrics-cache.cpp
 lyrics/lyrics-thread.cpp
@@ -51,6 +53,8 @@ render/renderer/05-weather.cpp
 render/renderer/06-file-tray.cpp
 render/renderer/07-hardware.cpp
 render/renderer/08-lyrics-tab.cpp
+render/renderer/10-text-helpers.cpp
+render/renderer/11-appointments.cpp
 render/renderer/12-time.cpp
 render/renderer/13-idle.cpp
 render/renderer/14-game-overlay.cpp

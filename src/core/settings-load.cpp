@@ -394,6 +394,16 @@ void LoadSettings() {
     next.weather = Wh_GetIntSetting(L"Modules.Weather") != 0;
     next.weatherCity = GetStringSettingWithFallback(L"Modules.WeatherCity", L"Weather.WeatherCity", L"CalendarWeather.WeatherCity");
     next.weatherFahrenheit = Wh_GetIntSetting(L"Modules.WeatherFahrenheit") != 0;
+    next.appointments = Wh_GetIntSetting(L"Modules.Appointments") != 0;
+    next.appointmentCalendars.clear();
+    for (int i = 0; i < 8; ++i) {
+        wchar_t key[64];
+        swprintf_s(key, L"Modules.AppointmentCalendars[%d]", i);
+        std::wstring entry = GetStringSettingCopy(key);
+        if (!entry.empty()) {
+            next.appointmentCalendars.push_back(std::move(entry));
+        }
+    }
     next.lyrics = Wh_GetIntSetting(L"Modules.Lyrics") != 0;
     next.lyricsVisualizer = Wh_GetIntSetting(L"Modules.LyricsVisualizer") != 0;
     next.karaokeLyrics = Wh_GetIntSetting(L"Modules.KaraokeLyrics") != 0;
@@ -678,12 +688,15 @@ void LoadSettings() {
     // this, both could read the same "old" values and each decide a hotkey
     // re-registration was needed, or neither would.
     bool cityChanged = false;
+    bool calendarChanged = false;
     bool hotkeySettingChanged = false;
     bool backdropChanged = false;
     bool capsLockChanged = false;
     {
         std::lock_guard lock(g_settingsMutex);
         cityChanged = next.weatherCity != g_settings.weatherCity;
+        calendarChanged = next.appointments != g_settings.appointments ||
+                          next.appointmentCalendars != g_settings.appointmentCalendars;
         capsLockChanged = next.capsLock != g_settings.capsLock;
         hotkeySettingChanged =
             next.hideShowHotkeyEnabled != g_settings.hideShowHotkeyEnabled ||
@@ -705,6 +718,9 @@ void LoadSettings() {
     g_layoutDirty = true;
     if (cityChanged && g_settingsChangedEvent) {
         SetEvent(g_settingsChangedEvent);
+    }
+    if (calendarChanged && g_calendarRefreshEvent) {
+        SetEvent(g_calendarRefreshEvent);
     }
     // Installs or removes WH_KEYBOARD_LL to match. The keyboard thread would pick
     // this up on its next backstop tick anyway; this just makes it immediate.

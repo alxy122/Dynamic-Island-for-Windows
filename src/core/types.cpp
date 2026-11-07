@@ -247,6 +247,8 @@ struct Settings {
     bool weather = true;
     std::wstring weatherCity;
     bool weatherFahrenheit = false;
+    bool appointments = false;                        // Modules.Appointments
+    std::vector<std::wstring> appointmentCalendars;   // Modules.AppointmentCalendars[i]
     bool lyrics = false;
     bool lyricsVisualizer = true;
     bool karaokeLyrics = true;
@@ -647,6 +649,22 @@ struct LookupUiState {
 };
 LookupUiState g_lookupUi;
 
+// One appointment from a calendar feed (UTC epoch seconds).
+struct CalEvent {
+    int64_t startUtc = 0;
+    int64_t endUtc = 0;
+    bool allDay = false;
+    std::wstring title;
+    uint32_t color = 0x4285F4;  // 0xRRGGBB
+};
+
+// Published by CalendarThreadProc; the vector is immutable once shared, so the
+// per-frame SharedState copy only bumps a reference count.
+struct CalendarSnapshot {
+    bool hasData = false;
+    std::shared_ptr<const std::vector<CalEvent>> events;
+};
+
 enum class SongIdStatus {
     Listening,
     Matching,
@@ -688,6 +706,7 @@ struct SharedState {
     ProgressSnapshot progress;
     SystemSnapshot system;
     WeatherSnapshot weather;
+    CalendarSnapshot calendar;
     LyricsSnapshot lyrics;
     LookupSnapshot lookup;
     std::vector<LookupRecent> lookupRecent;  // newest first, guarded by g_stateMutex

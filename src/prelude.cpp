@@ -53,6 +53,7 @@
 #include <utility>
 #include <vector>
 #include <set>
+#include <map>
 #include <winrt/base.h>
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Foundation.Collections.h>
