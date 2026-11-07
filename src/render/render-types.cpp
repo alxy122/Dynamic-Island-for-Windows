@@ -150,7 +150,7 @@ constexpr float kCollapsedLyricsWidth = 320.0f;
 bool CollapsedLyricsActive(const SharedState& state, const Settings& settings) {
     // Stays wide for as long as media is available. If there are no lyrics to
     // show, DrawCollapsedLyrics shows the media title instead.
-    return settings.collapsedLyrics && settings.media && state.media.available;
+    return settings.collapsedLyrics && MediaVisible(state, settings);
 }
 
 // One pre-built lyric line. Built once when the line changes, then reused every

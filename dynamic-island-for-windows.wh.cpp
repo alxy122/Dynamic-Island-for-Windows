@@ -388,6 +388,9 @@ We love community contributions! To ensure high-quality updates, please follow t
   - ClaudeUsageFile: ""
     $name: Claude usage file (optional)
     $description: "Path of the JSON file written by the status line script. Leave empty for %USERPROFILE%\\.claude\\island-usage.json."
+  - MediaPausedShowsClock: true
+    $name: Show clock, weather and appointments while paused
+    $description: "When the player is paused, the collapsed island switches back to the idle view (clock, weather, next appointment) instead of keeping the paused track and its lyrics on screen. Open the island (hover or click) and the paused player is still there, so you can resume it; its X button removes it until it plays again. Playback resumes the media view on its own. Turn off to keep the old behaviour."
   - Volume: true
     $name: Volume slider flyout
     $description: Shows a volume slider banner on the island when adjusting system volume. Disable if you prefer the default Windows volume flyout.
@@ -776,6 +779,13 @@ namespace MediaLayout {
     // this height is still the collapsed pill and must not be hit-tested.
     constexpr float kExpandedMinHeight = 60.0f;
 
+    // X button of a paused player (top right, above the sound waves): dismisses
+    // the paused session until it plays again. Draw code and hit test share these.
+    constexpr float kDismissInsetRight = 40.0f;  // button centre from the right edge
+    constexpr float kDismissY = 22.0f;           // button centre from the top edge
+    constexpr float kDismissRadius = 10.0f;
+    constexpr float kDismissHitPad = 5.0f;
+
     // ── Source dock ──────────────────────────────────────────────────────────
     // Widest layout is 3 slots = 86px, so it ends at x=106, clear of the prev
     // button (~110). Draw code and hit test both read these.
@@ -840,6 +850,7 @@ namespace ImmersiveLayout {
 }
 std::atomic<bool> g_immersiveLyrics{false};   // lyrics view requested
 std::atomic<bool> g_hoveredLyricsBtn{false};
+std::atomic<bool> g_hoveredMediaDismiss{false};  // cursor on the paused player's X button
 std::atomic<float> g_immersiveMixPub{0.0f};   // eased 0..1 mix, published by DrawMedia for hit tests
 
 // Layout for the File Tray card (#33). Shared by DrawFileTrayDashboard and the
@@ -1347,6 +1358,7 @@ struct Settings {
     bool clockFollowSystem = true;
     std::wstring dateFormat;        // empty = locale default
     bool mediaPillClock = false;    // show the clock inside the collapsed media pill
+    bool mediaPausedShowsClock = true;  // paused player -> idle view (Modules.MediaPausedShowsClock)
     bool dateFirst = false;
     int firstDayOfWeek = -1;        // 0 = Sunday .. 6 = Saturday, -1 = follow Windows
 
@@ -1942,6 +1954,53 @@ double NowSeconds() {
     using clock = std::chrono::steady_clock;
     static const auto start = clock::now();
     return std::chrono::duration<double>(clock::now() - start).count();
+}
+
+// Is there a media session the island should be showing right now?
+//
+// A paused player keeps its session, so media.available stays true for hours and
+// the island used to sit on the paused track (and a frozen lyric line) for as
+// long. With Modules.MediaPausedShowsClock a session only counts while it plays,
+// plus a short grace so the brief non-playing blip between two tracks does not
+// make the island flap to the clock and back. Every place that asks "is the media
+// view up?" goes through here, so clicks, tabs and lyrics all agree with what is
+// actually drawn (a click on the idle clock must never hit the player's controls).
+//
+// A paused session is only hidden from the collapsed island: while the island is
+// open (hover, click or pinned) the player is still there, so playback can be
+// resumed. Its X button (MediaDismissHitTest) dismisses the paused session for
+// good, until it plays again.
+constexpr double kMediaPauseGraceSeconds = 2.5;
+std::atomic<double> g_mediaLastPlayingAt{-1e9};
+std::atomic<bool> g_islandOpen{false};           // last frame: hover-expanded or pinned (render loop)
+std::atomic<uint64_t> g_mediaDismissedKey{0};    // MediaSessionKey of the dismissed paused session, 0 = none
+
+// Identifies "this paused track in this app", so a dismissal does not stick to
+// the next song or to another player.
+uint64_t MediaSessionKey(const MediaSnapshot& media) {
+    const std::wstring id = media.sourceAppUserModelId + L'\n' + media.title + L'\n' + media.artist;
+    return static_cast<uint64_t>(std::hash<std::wstring>{}(id)) | 1ull;  // never 0
+}
+
+bool MediaVisible(const SharedState& state, const Settings& settings) {
+    if (!settings.media || !state.media.available) {
+        return false;
+    }
+    const double now = NowSeconds();
+    if (state.media.playing) {
+        g_mediaLastPlayingAt.store(now, std::memory_order_relaxed);
+        g_mediaDismissedKey.store(0, std::memory_order_relaxed);  // playing again: back for good
+        return true;
+    }
+    const uint64_t dismissed = g_mediaDismissedKey.load(std::memory_order_relaxed);
+    if (dismissed != 0 && dismissed == MediaSessionKey(state.media)) {
+        return false;
+    }
+    if (!settings.mediaPausedShowsClock) {
+        return true;
+    }
+    return now - g_mediaLastPlayingAt.load(std::memory_order_relaxed) < kMediaPauseGraceSeconds ||
+           g_islandOpen.load(std::memory_order_relaxed);
 }
 
 float Clamp(float v, float lo, float hi) {
@@ -2675,6 +2734,19 @@ bool MediaLyricsButtonHitTest(const MediaContentPoint& rawPt) {
            std::fabs(pt.y - MediaLayout::kControlsY) <= reach;
 }
 
+// True when the point is over the X button of a paused player. Not offered in
+// the immersive lyrics view, whose header uses that corner. Callers check that
+// the player is paused.
+bool MediaDismissHitTest(const MediaContentPoint& pt) {
+    if (!pt.valid || pt.height <= MediaLayout::kExpandedMinHeight ||
+        g_immersiveMixPub.load(std::memory_order_relaxed) > 0.01f) {
+        return false;
+    }
+    const float cx = pt.width - MediaLayout::kDismissInsetRight;
+    const float reach = MediaLayout::kDismissRadius + MediaLayout::kDismissHitPad;
+    return std::fabs(pt.x - cx) <= reach && std::fabs(pt.y - MediaLayout::kDismissY) <= reach;
+}
+
 // ── Source dock: slot layout + hit testing ──────────────────────────────────
 struct DockSlots {
     int count = 0;                      // slots drawn
@@ -3383,6 +3455,7 @@ void LoadSettings() {
         next.firstDayOfWeek = -1;
     }
     next.mediaPillClock = Wh_GetIntSetting(L"Modules.MediaPillClock") != 0;
+    next.mediaPausedShowsClock = Wh_GetIntSetting(L"Modules.MediaPausedShowsClock") != 0;
 
     // ── Localization (#35) ───────────────────────────────────────────────────
     {
@@ -14208,7 +14281,7 @@ constexpr float kCollapsedLyricsWidth = 320.0f;
 bool CollapsedLyricsActive(const SharedState& state, const Settings& settings) {
     // Stays wide for as long as media is available. If there are no lyrics to
     // show, DrawCollapsedLyrics shows the media title instead.
-    return settings.collapsedLyrics && settings.media && state.media.available;
+    return settings.collapsedLyrics && MediaVisible(state, settings);
 }
 
 // One pre-built lyric line. Built once when the line changes, then reused every
@@ -18888,6 +18961,11 @@ class Renderer {
                                      immersiveMix < 0.01f);
                 }
 
+                // Paused: an X to dismiss the session (it returns once it plays again).
+                if (!state.media.playing && immersiveMix < 0.01f) {
+                    DrawMediaDismissButton(rect);
+                }
+
                 // Immersive: title / artist / spectrum / source line cross-fade out.
                 const bool normalFaded = BeginImmersiveFade(1.0f - immersiveMix);
                 if (immersiveMix < 0.999f) {
@@ -19347,6 +19425,25 @@ class Renderer {
 
     void EndImmersiveFade(bool began) {
         if (began) target_->PopLayer();
+    }
+
+    // Small round X in the top right corner of a paused player (MediaDismissHitTest).
+    void DrawMediaDismissButton(D2D1_RECT_F rect) {
+        if (!EnsureRoundJoinStyle()) return;
+        const float r = MediaLayout::kDismissRadius;
+        const D2D1_POINT_2F c = D2D1::Point2F(rect.right - MediaLayout::kDismissInsetRight,
+                                              rect.top + MediaLayout::kDismissY);
+        const bool hovered = g_hoveredMediaDismiss.load(std::memory_order_relaxed);
+        if (ID2D1SolidColorBrush* bg = AcquireBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, hovered ? 0.14f : 0.06f))) {
+            target_->FillEllipse(D2D1::Ellipse(c, r, r), bg);
+        }
+        const float arm = 3.6f;
+        textBrush_->SetOpacity(hovered ? 0.95f : 0.62f);
+        target_->DrawLine(D2D1::Point2F(c.x - arm, c.y - arm), D2D1::Point2F(c.x + arm, c.y + arm),
+                          textBrush_.Get(), 1.5f, roundJoinStyle_.Get());
+        target_->DrawLine(D2D1::Point2F(c.x - arm, c.y + arm), D2D1::Point2F(c.x + arm, c.y - arm),
+                          textBrush_.Get(), 1.5f, roundJoinStyle_.Get());
+        textBrush_->SetOpacity(1.0f);
     }
 
     // Speech-bubble button. Lights up in the accent colour while the lyrics view is open.
@@ -24096,7 +24193,7 @@ std::vector<IslandKind> ChooseActivities(const SharedState& state, const Setting
     // already gated on MediaExpandBlocked, but with MediaAutoExpand off by
     // default that gate never fired — so "firefox.exe" in the list looked like
     // a no-op while the pill still switched to music mode.
-    if (settings.media && state.media.available && !MediaExpandBlocked(state.media)) {
+    if (MediaVisible(state, settings) && !MediaExpandBlocked(state.media)) {
         activities.push_back(IslandKind::Media);
     }
 
@@ -25470,7 +25567,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 bool mediaActive = false;
                 {
                     std::lock_guard lock(g_stateMutex);
-                    mediaActive = g_settings.media && g_state.media.available;
+                    mediaActive = MediaVisible(g_state, g_settings);
                 }
 
                 const int currentTab = NormalizedTabIndex(g_settings);
@@ -25480,7 +25577,8 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                                                MediaTransportHitTest(cp) != -1 ||
                                                MediaScrubFractionFromContent(cp) >= 0.0f ||
                                                g_hoveredSourceSlot.load(std::memory_order_relaxed) >= 0 ||
-                                               (g_settings.mediaTabLyrics && MediaLyricsButtonHitTest(cp));
+                                               (g_settings.mediaTabLyrics && MediaLyricsButtonHitTest(cp)) ||
+                                               g_hoveredMediaDismiss.load(std::memory_order_relaxed);
                     if (hoverClickable) {
                         SetCursor(LoadCursorW(nullptr, IDC_HAND));
                         return TRUE;
@@ -25540,7 +25638,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 bool mediaActive = false;
                 {
                     std::lock_guard lock(g_stateMutex);
-                    mediaActive = g_settings.media && g_state.media.available;
+                    mediaActive = MediaVisible(g_state, g_settings);
                 }
 
                 const int currentTab = NormalizedTabIndex(g_settings);
@@ -25619,11 +25717,21 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
             int hovered = -1;
             bool mediaActive = false;
+            bool mediaPaused = false;
             {
                 std::lock_guard lock(g_stateMutex);
-                mediaActive = g_settings.media && g_state.media.available;
+                mediaActive = MediaVisible(g_state, g_settings);
+                mediaPaused = !g_state.media.playing;
             }
             const int currentTab = NormalizedTabIndex(g_settings);
+
+            {
+                const bool onDismiss = mediaActive && mediaPaused && currentTab == MediaTabIndex(g_settings) &&
+                                       MediaDismissHitTest(MediaContentFromClient(xPos, yPos));
+                if (g_hoveredMediaDismiss.exchange(onDismiss) != onDismiss) {
+                    g_layoutDirty = true;
+                }
+            }
 
             int hoveredSlot = -1;
             if (mediaActive && currentTab == MediaTabIndex(g_settings)) {
@@ -25714,6 +25822,9 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             if (g_hoveredLyricsBtn.exchange(false)) {
                 g_layoutDirty = true;
             }
+            if (g_hoveredMediaDismiss.exchange(false)) {
+                g_layoutDirty = true;
+            }
             s_trayPressActive = false;
             if (g_hoveredApptMore.exchange(false)) {
                 g_layoutDirty = true;
@@ -25796,10 +25907,14 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     return 0;
                 }
                 std::vector<IslandKind> kinds;
+                bool mediaPaused = false;
+                uint64_t mediaKey = 0;
                 {
                     std::lock_guard lock(g_stateMutex);
-                    mediaActive = g_settings.media && g_state.media.available;
+                    mediaActive = MediaVisible(g_state, g_settings);
                     kinds = ChooseActivities(g_state, g_settings, NowSeconds());
+                    mediaPaused = !g_state.media.playing;
+                    mediaKey = MediaSessionKey(g_state.media);
                 }
 
                 // Song recognition card: open the track when found, otherwise dismiss / cancel.
@@ -25941,6 +26056,14 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 }
 
                 if (mediaActive && currentTab == MediaTabIndex(g_settings)) {
+                    // X of a paused player: dismiss this session until it plays again.
+                    if (mediaPaused && MediaDismissHitTest(cp)) {
+                        g_mediaDismissedKey.store(mediaKey, std::memory_order_relaxed);
+                        g_hoveredMediaDismiss = false;
+                        g_layoutDirty = true;
+                        return 0;
+                    }
+
                     // Source dock: "+N" opens the list, another slot switches to it.
                     {
                         const DockHit dock = ResolveSourceDockHit(cp);
@@ -26506,7 +26629,7 @@ DWORD WINAPI RenderThreadProc(void*) {
 
         const std::vector<IslandKind> kinds = ChooseActivities(snapshot, g_settings, now);
         g_lyricsTabAvailable.store(
-            g_settings.lyrics && g_settings.media && snapshot.media.available,
+            g_settings.lyrics && MediaVisible(snapshot, g_settings),
             std::memory_order_relaxed);
         Activity primary = ActivityForKind(kinds[0], g_settings, snapshot);
         std::optional<Activity> secondary;
@@ -26632,6 +26755,13 @@ DWORD WINAPI RenderThreadProc(void*) {
             isHoverExpanded = false;
         } else if (isHoverExpanded || hoverUnhides || pinned || isTransientAlert || unhideGraceActive) {
             lastInteractionTime = now;
+        }
+
+        // A paused player comes back while the island is open (see MediaVisible).
+        // The activities for this frame are already chosen, so the switch happens
+        // on the next one.
+        if (g_islandOpen.exchange(isHoverExpanded || pinned) != (isHoverExpanded || pinned)) {
+            g_layoutDirty = true;
         }
 
         bool isHidden = false;

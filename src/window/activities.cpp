@@ -141,7 +141,7 @@ std::vector<IslandKind> ChooseActivities(const SharedState& state, const Setting
     // already gated on MediaExpandBlocked, but with MediaAutoExpand off by
     // default that gate never fired — so "firefox.exe" in the list looked like
     // a no-op while the pill still switched to music mode.
-    if (settings.media && state.media.available && !MediaExpandBlocked(state.media)) {
+    if (MediaVisible(state, settings) && !MediaExpandBlocked(state.media)) {
         activities.push_back(IslandKind::Media);
     }
 
