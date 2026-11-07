@@ -457,6 +457,11 @@ DWORD WINAPI RenderThreadProc(void*) {
         // on the next one.
         if (g_islandOpen.exchange(isHoverExpanded || pinned) != (isHoverExpanded || pinned)) {
             g_layoutDirty = true;
+            // Collapsed: let the media thread re-pick the source right away
+            // (a player paused from the island hands over to one still playing).
+            if (!(isHoverExpanded || pinned) && g_mediaRefreshEvent) {
+                SetEvent(g_mediaRefreshEvent);
+            }
         }
 
         bool isHidden = false;

@@ -1893,6 +1893,7 @@ std::mutex g_mediaSourceMutex;                     // leaf lock for the two stri
 std::wstring g_preferredMediaSource;               // AUMID the user picked; empty = Auto
 std::wstring g_switchTarget;                       // pending animated switch
 std::wstring g_dockOverrideAumid;                  // temporary pick from the dock; guarded by g_mediaSourceMutex
+std::wstring g_islandPausedAumid;                  // source paused with the island's own button; guarded by g_mediaSourceMutex
 std::atomic<unsigned> g_dockOverrideRev{0};        // bumped on every dock pick / Auto reset
 std::atomic<int> g_switchDir{1};
 std::atomic<unsigned> g_switchSeq{0};
@@ -5734,6 +5735,51 @@ std::wstring ChooseMediaSourceAumid(MediaSourceTracker& tracker, const std::wstr
             tracker.dockOverride = g_dockOverrideAumid;
         }
         tracker.dockOverrideBaseSeq = tracker.seqCounter;
+    }
+
+    // Paused with the island's own play/pause button while another app keeps playing:
+    // stay on the paused player while the island is open (so it can be resumed), and
+    // move on to the playing app once the island collapses. Without this a dock pick
+    // kept the island on the paused player, which the collapsed island then hides,
+    // so sound was playing with no media pill and no sound waves.
+    {
+        auto isPlaying = [&](const std::wstring& id) {
+            const auto it = tracker.wasPlaying.find(id);
+            return it != tracker.wasPlaying.end() && it->second;
+        };
+        std::wstring paused;
+        {
+            std::lock_guard lock(g_mediaSourceMutex);
+            paused = g_islandPausedAumid;
+        }
+        if (!paused.empty()) {
+            bool otherPlaying = false;
+            for (const std::wstring& id : tracker.order) {
+                if (id != paused && isPlaying(id)) {
+                    otherPlaying = true;
+                    break;
+                }
+            }
+            const bool stillPaused = exists(paused) && !isPlaying(paused);
+            if (!stillPaused) {
+                std::lock_guard lock(g_mediaSourceMutex);  // resumed or gone
+                if (g_islandPausedAumid == paused) g_islandPausedAumid.clear();
+            } else if (otherPlaying) {
+                if (g_islandOpen.load(std::memory_order_relaxed)) {
+                    return paused;
+                }
+                {
+                    std::lock_guard lock(g_mediaSourceMutex);
+                    if (g_islandPausedAumid == paused) g_islandPausedAumid.clear();
+                    if (g_dockOverrideAumid == paused) g_dockOverrideAumid.clear();
+                }
+                if (tracker.dockOverride == paused) {
+                    tracker.dockOverride.clear();
+                }
+                // Not a new track: no auto-expand, no "recent track change" window.
+                g_userSourceSwitchAt.store(NowSeconds());
+            }
+        }
     }
 
     if (!tracker.dockOverride.empty()) {
@@ -26261,6 +26307,19 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     if (cmd != -1) {
                         if (cmd == 0) g_skipTriggerPrev.fetch_add(1);
                         else if (cmd == 2) g_skipTriggerNext.fetch_add(1);
+                        if (cmd == 1) {
+                            // Remember a pause done here, so the island can move on to
+                            // another playing app once it collapses (ChooseMediaSourceAumid).
+                            std::wstring aumid;
+                            bool wasPlaying = false;
+                            {
+                                std::lock_guard lock(g_stateMutex);
+                                aumid = g_state.media.sourceAppUserModelId;
+                                wasPlaying = g_state.media.playing;
+                            }
+                            std::lock_guard lock(g_mediaSourceMutex);
+                            g_islandPausedAumid = wasPlaying ? aumid : std::wstring();
+                        }
                         g_layoutDirty = true;
                         SendMediaTransportCommand(cmd);
                         return 0;
@@ -26933,6 +26992,11 @@ DWORD WINAPI RenderThreadProc(void*) {
         // on the next one.
         if (g_islandOpen.exchange(isHoverExpanded || pinned) != (isHoverExpanded || pinned)) {
             g_layoutDirty = true;
+            // Collapsed: let the media thread re-pick the source right away
+            // (a player paused from the island hands over to one still playing).
+            if (!(isHoverExpanded || pinned) && g_mediaRefreshEvent) {
+                SetEvent(g_mediaRefreshEvent);
+            }
         }
 
         bool isHidden = false;

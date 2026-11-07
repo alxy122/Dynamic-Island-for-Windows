@@ -587,6 +587,51 @@ std::wstring ChooseMediaSourceAumid(MediaSourceTracker& tracker, const std::wstr
         tracker.dockOverrideBaseSeq = tracker.seqCounter;
     }
 
+    // Paused with the island's own play/pause button while another app keeps playing:
+    // stay on the paused player while the island is open (so it can be resumed), and
+    // move on to the playing app once the island collapses. Without this a dock pick
+    // kept the island on the paused player, which the collapsed island then hides,
+    // so sound was playing with no media pill and no sound waves.
+    {
+        auto isPlaying = [&](const std::wstring& id) {
+            const auto it = tracker.wasPlaying.find(id);
+            return it != tracker.wasPlaying.end() && it->second;
+        };
+        std::wstring paused;
+        {
+            std::lock_guard lock(g_mediaSourceMutex);
+            paused = g_islandPausedAumid;
+        }
+        if (!paused.empty()) {
+            bool otherPlaying = false;
+            for (const std::wstring& id : tracker.order) {
+                if (id != paused && isPlaying(id)) {
+                    otherPlaying = true;
+                    break;
+                }
+            }
+            const bool stillPaused = exists(paused) && !isPlaying(paused);
+            if (!stillPaused) {
+                std::lock_guard lock(g_mediaSourceMutex);  // resumed or gone
+                if (g_islandPausedAumid == paused) g_islandPausedAumid.clear();
+            } else if (otherPlaying) {
+                if (g_islandOpen.load(std::memory_order_relaxed)) {
+                    return paused;
+                }
+                {
+                    std::lock_guard lock(g_mediaSourceMutex);
+                    if (g_islandPausedAumid == paused) g_islandPausedAumid.clear();
+                    if (g_dockOverrideAumid == paused) g_dockOverrideAumid.clear();
+                }
+                if (tracker.dockOverride == paused) {
+                    tracker.dockOverride.clear();
+                }
+                // Not a new track: no auto-expand, no "recent track change" window.
+                g_userSourceSwitchAt.store(NowSeconds());
+            }
+        }
+    }
+
     if (!tracker.dockOverride.empty()) {
         bool somethingNewStarted = false;
         for (const std::wstring& id : tracker.order) {
