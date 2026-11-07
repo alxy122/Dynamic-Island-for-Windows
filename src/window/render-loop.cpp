@@ -571,6 +571,12 @@ DWORD WINAPI RenderThreadProc(void*) {
                 const float clockSection = g_settings.mediaPillClock
                     ? renderer.MeasureMediaPill(snapshot, g_settings).sectionWidth
                     : 0.0f;
+                // The lyrics thread only works while lyrics are on screen. The
+                // pill now stays narrow until lyrics are found, so keep it looking
+                // for as long as the collapsed pill could show them.
+                if (g_settings.collapsedLyrics) {
+                    g_lastLyricsViewTime.store(NowSeconds(), std::memory_order_relaxed);
+                }
                 if (CollapsedLyricsActive(snapshot, g_settings)) {
                     // Collapsed but carrying lyrics: wider pill, same height.
                     primary.width = (kCollapsedLyricsWidth + clockSection) * g_settings.sizeScale;

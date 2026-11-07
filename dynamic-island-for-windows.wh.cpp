@@ -377,6 +377,9 @@ We love community contributions! To ensure high-quality updates, please follow t
   - MediaAutoExpand: false
     $name: Auto-expand on track change
     $description: Automatically expand the island when a new song or video starts playing. If disabled, album art updates smoothly in the collapsed pill without unprompted expansion.
+  - MediaPillInfo: true
+    $name: Keep clock and weather in the collapsed media pill
+    $description: "While something plays that has no lyrics to show (a video, a stream in the browser, a podcast), the collapsed media pill keeps the clock and the weather on its left, next to the cover and the sound waves, instead of hiding them. Hovering still opens the player. When a lyric line is shown, the pill falls back to the clock option below."
   - MediaPillClock: false
     $name: Show clock in the collapsed media pill
     $description: While media is playing, the collapsed pill also shows the current time on the left, separated from the album cover by a thin divider. Hovering still opens the normal player. Uses the same 12h/24h and seconds options as the clock below. Off by default.
@@ -12960,12 +12963,43 @@ std::wstring WidestDigitForm(std::wstring text) {
 // Width of the collapsed media pill while it carries a lyric line (content px).
 constexpr float kCollapsedLyricsWidth = 320.0f;
 
-// True when the collapsed pill should be widened for lyrics. "fetching" counts
-// too, so the pill does not shrink and regrow on every track change.
+// Synced lyrics that belong to the track playing right now (same test as
+// DrawCollapsedLyrics uses before it shows a lyric line).
+bool CollapsedLyricsUsable(const SharedState& state) {
+    return state.lyrics.hasData && state.lyrics.synced && !state.lyrics.lines.empty() &&
+           state.lyrics.matchedTitle == state.media.title &&
+           state.lyrics.matchedArtist == state.media.artist;
+}
+
+// Did the last track that was decided either way have lyrics? Bridges the
+// look-up after a track change, see CollapsedLyricsActive. Render thread only.
+std::atomic<bool> g_collapsedLyricsLastHad{false};
+
+// True when the collapsed pill should be widened for lyrics.
+//
+// Only while there really are synced lyrics for the current track. A browser
+// stream, a video or a podcast has none, and used to get a 320px pill that just
+// repeated the page title while the clock, weather and the rest were hidden.
+// While the lyrics thread is still looking up a new track, the pill keeps the
+// width the previous track had, so an album does not shrink and regrow at every
+// song change, and a video does not flash wide for a second.
 bool CollapsedLyricsActive(const SharedState& state, const Settings& settings) {
-    // Stays wide for as long as media is available. If there are no lyrics to
-    // show, DrawCollapsedLyrics shows the media title instead.
-    return settings.collapsedLyrics && settings.media && state.media.available;
+    if (!settings.collapsedLyrics || !settings.media || !state.media.available) {
+        return false;
+    }
+    if (CollapsedLyricsUsable(state)) {
+        g_collapsedLyricsLastHad.store(true, std::memory_order_relaxed);
+        return true;
+    }
+    const bool forThisTrack = state.lyrics.matchedTitle == state.media.title &&
+                              state.lyrics.matchedArtist == state.media.artist;
+    if (forThisTrack && !state.lyrics.fetching) {
+        // Decided: not found, unsynced, or the request gave up.
+        g_collapsedLyricsLastHad.store(false, std::memory_order_relaxed);
+        return false;
+    }
+    // Still looking (or the lyrics thread has not seen the new track yet).
+    return g_collapsedLyricsLastHad.load(std::memory_order_relaxed);
 }
 
 // One pre-built lyric line. Built once when the line changes, then reused every
@@ -25037,6 +25071,12 @@ DWORD WINAPI RenderThreadProc(void*) {
                 const float clockSection = g_settings.mediaPillClock
                     ? renderer.MeasureMediaPill(snapshot, g_settings).sectionWidth
                     : 0.0f;
+                // The lyrics thread only works while lyrics are on screen. The
+                // pill now stays narrow until lyrics are found, so keep it looking
+                // for as long as the collapsed pill could show them.
+                if (g_settings.collapsedLyrics) {
+                    g_lastLyricsViewTime.store(NowSeconds(), std::memory_order_relaxed);
+                }
                 if (CollapsedLyricsActive(snapshot, g_settings)) {
                     // Collapsed but carrying lyrics: wider pill, same height.
                     primary.width = (kCollapsedLyricsWidth + clockSection) * g_settings.sizeScale;

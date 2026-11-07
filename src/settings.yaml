@@ -259,6 +259,9 @@
   - MediaAutoExpand: false
     $name: Auto-expand on track change
     $description: Automatically expand the island when a new song or video starts playing. If disabled, album art updates smoothly in the collapsed pill without unprompted expansion.
+  - MediaPillInfo: true
+    $name: Keep clock and weather in the collapsed media pill
+    $description: "While something plays that has no lyrics to show (a video, a stream in the browser, a podcast), the collapsed media pill keeps the clock and the weather on its left, next to the cover and the sound waves, instead of hiding them. Hovering still opens the player. When a lyric line is shown, the pill falls back to the clock option below."
   - MediaPillClock: false
     $name: Show clock in the collapsed media pill
     $description: While media is playing, the collapsed pill also shows the current time on the left, separated from the album cover by a thin divider. Hovering still opens the normal player. Uses the same 12h/24h and seconds options as the clock below. Off by default.
