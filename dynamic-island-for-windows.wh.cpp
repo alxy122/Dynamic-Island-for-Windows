@@ -451,9 +451,21 @@ We love community contributions! To ensure high-quality updates, please follow t
   - Appointments: false
     $name: Next appointment (Google Calendar)
     $description: "Shows your next appointment of the day. Collapsed island: a calendar icon with a countdown (<5h ... <1m, now). Start page: a line under the date with the time and title. Needs at least one calendar feed below."
-  - AppointmentCalendars: [""]
-    $name: Calendar feeds (secret iCal addresses)
-    $description: "One entry per calendar, written as Name|#RRGGBB|URL. Name and colour are optional, the bare URL works too. In Google Calendar open the calendar's settings and copy 'Secret address in iCal format'. Treat that URL like a password. Up to 8 calendars."
+  - AppointmentFeeds:
+    - - Name: ""
+        $name: Name
+        $description: Shown for this calendar, so several feeds stay apart. Leave empty for "Calendar 1", "Calendar 2" and so on.
+      - Enabled: true
+        $name: Enabled
+        $description: Turn off to hide this calendar without deleting its address.
+      - Color: ""
+        $name: Colour (optional)
+        $description: "Hex colour like #4285F4 for the bar next to its appointments. Leave empty for an automatic colour."
+      - Url: ""
+        $name: Secret iCal address
+        $description: "In Google Calendar open the calendar's settings and copy 'Secret address in iCal format'. Treat it like a password."
+    $name: Calendar feeds
+    $description: "One entry per calendar, up to 8. Give each one a name, and switch a calendar off to hide it without losing its address."
   - MediaTabLyrics: false
     $name: Lyrics in the media tab
     $description: Adds a lyrics button to the media player controls to toggle an immersive lyrics view over the media tab. Can also be toggled from the right-click menu.
@@ -3569,13 +3581,35 @@ void LoadSettings() {
     next.appointments = Wh_GetIntSetting(L"Modules.Appointments") != 0;
     next.claudeUsage = Wh_GetIntSetting(L"Modules.ClaudeUsage") != 0;
     next.claudeUsageFile = GetStringSettingCopy(L"Modules.ClaudeUsageFile");
+    // Each feed becomes "Name|#RRGGBB|URL" (see ParseCalendarSources). Switched-off
+    // feeds are left out; they keep their address in the settings.
     next.appointmentCalendars.clear();
+    bool anyFeedUrl = false;
     for (int i = 0; i < 8; ++i) {
-        wchar_t key[64];
-        swprintf_s(key, L"Modules.AppointmentCalendars[%d]", i);
-        std::wstring entry = GetStringSettingCopy(key);
-        if (!entry.empty()) {
-            next.appointmentCalendars.push_back(std::move(entry));
+        wchar_t key[96];
+        swprintf_s(key, L"Modules.AppointmentFeeds[%d].Url", i);
+        const std::wstring url = GetStringSettingCopy(key);
+        if (url.empty()) continue;
+        anyFeedUrl = true;
+        swprintf_s(key, L"Modules.AppointmentFeeds[%d].Enabled", i);
+        if (Wh_GetIntSetting(key) == 0) continue;
+        swprintf_s(key, L"Modules.AppointmentFeeds[%d].Name", i);
+        std::wstring name = GetStringSettingCopy(key);
+        std::replace(name.begin(), name.end(), L'|', L' ');
+        swprintf_s(key, L"Modules.AppointmentFeeds[%d].Color", i);
+        std::wstring color = GetStringSettingCopy(key);
+        std::replace(color.begin(), color.end(), L'|', L' ');
+        next.appointmentCalendars.push_back(name + L"|" + color + L"|" + url);
+    }
+    // Older versions stored each feed as one "Name|#RRGGBB|URL" string.
+    if (!anyFeedUrl) {
+        for (int i = 0; i < 8; ++i) {
+            wchar_t key[64];
+            swprintf_s(key, L"Modules.AppointmentCalendars[%d]", i);
+            std::wstring entry = GetStringSettingCopy(key);
+            if (!entry.empty()) {
+                next.appointmentCalendars.push_back(std::move(entry));
+            }
         }
     }
     next.lyrics = Wh_GetIntSetting(L"Modules.Lyrics") != 0;

@@ -398,13 +398,35 @@ void LoadSettings() {
     next.appointments = Wh_GetIntSetting(L"Modules.Appointments") != 0;
     next.claudeUsage = Wh_GetIntSetting(L"Modules.ClaudeUsage") != 0;
     next.claudeUsageFile = GetStringSettingCopy(L"Modules.ClaudeUsageFile");
+    // Each feed becomes "Name|#RRGGBB|URL" (see ParseCalendarSources). Switched-off
+    // feeds are left out; they keep their address in the settings.
     next.appointmentCalendars.clear();
+    bool anyFeedUrl = false;
     for (int i = 0; i < 8; ++i) {
-        wchar_t key[64];
-        swprintf_s(key, L"Modules.AppointmentCalendars[%d]", i);
-        std::wstring entry = GetStringSettingCopy(key);
-        if (!entry.empty()) {
-            next.appointmentCalendars.push_back(std::move(entry));
+        wchar_t key[96];
+        swprintf_s(key, L"Modules.AppointmentFeeds[%d].Url", i);
+        const std::wstring url = GetStringSettingCopy(key);
+        if (url.empty()) continue;
+        anyFeedUrl = true;
+        swprintf_s(key, L"Modules.AppointmentFeeds[%d].Enabled", i);
+        if (Wh_GetIntSetting(key) == 0) continue;
+        swprintf_s(key, L"Modules.AppointmentFeeds[%d].Name", i);
+        std::wstring name = GetStringSettingCopy(key);
+        std::replace(name.begin(), name.end(), L'|', L' ');
+        swprintf_s(key, L"Modules.AppointmentFeeds[%d].Color", i);
+        std::wstring color = GetStringSettingCopy(key);
+        std::replace(color.begin(), color.end(), L'|', L' ');
+        next.appointmentCalendars.push_back(name + L"|" + color + L"|" + url);
+    }
+    // Older versions stored each feed as one "Name|#RRGGBB|URL" string.
+    if (!anyFeedUrl) {
+        for (int i = 0; i < 8; ++i) {
+            wchar_t key[64];
+            swprintf_s(key, L"Modules.AppointmentCalendars[%d]", i);
+            std::wstring entry = GetStringSettingCopy(key);
+            if (!entry.empty()) {
+                next.appointmentCalendars.push_back(std::move(entry));
+            }
         }
     }
     next.lyrics = Wh_GetIntSetting(L"Modules.Lyrics") != 0;
