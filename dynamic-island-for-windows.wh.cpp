@@ -1284,6 +1284,7 @@ struct Settings {
     int lyricsOffsetMs = 0;      // Modules.LyricsOffsetMs, speakers / wired, ms
     int lyricsOffsetBtMs = 0;    // Modules.LyricsOffsetBluetoothMs, Bluetooth output, ms
     bool collapsedLyrics = false;  // lyrics inside the collapsed media pill (right-click toggle)
+    bool mediaPillInfo = true;     // Modules.MediaPillInfo: clock + weather in the pill when no lyric line is shown
     bool lyricsPinnedFirst = false;  // Lyrics tab is the first tab of the expanded media view (right-click toggle)
     bool lyricsCache = true;       // Modules.LyricsCache
     int lyricsCacheMaxMB = 25;     // Modules.LyricsCacheMaxMB; 0 = disk cache off
@@ -3410,6 +3411,7 @@ void LoadSettings() {
     next.expandOnHover = localExpandOnHover >= 0 ? (localExpandOnHover != 0) : (Wh_GetIntSetting(L"Behavior.ExpandOnHover") != 0);
     // Right-click toggle; stored with Wh_SetIntValue so it survives restarts.
     next.collapsedLyrics = Wh_GetIntValue(L"CollapsedLyrics", 0) != 0;
+    next.mediaPillInfo = Wh_GetIntSetting(L"Modules.MediaPillInfo") != 0;
     next.lyricsPinnedFirst = Wh_GetIntValue(L"LyricsPinnedFirst", 0) != 0;
     {
         // Right-click choice wins until the Mod Settings value is changed.
@@ -12936,9 +12938,16 @@ struct SwapTextState {
     MarqueeLayoutCache prevCache;     // layout cache for the outgoing text
 };
 
+// One reading in the info section of the collapsed media pill (clock, weather).
+struct MediaPillSlot {
+    std::wstring text;
+    float width = 0.0f;      // measured in the widest-digit form
+    bool colorFont = false;  // contains an emoji
+};
+
 struct MediaPillMetrics {
-    float clockWidth = 0.0f;
-    float sectionWidth = 0.0f;                       // clock + divider block on the left
+    std::vector<MediaPillSlot> slots;                // left to right, each followed by a divider
+    float sectionWidth = 0.0f;                       // slots + dividers block on the left
     float totalWidth = MediaPillLayout::kBaseWidth;  // content space, before sizeScale
 };
 
@@ -13353,29 +13362,65 @@ class Renderer {
     // sizes; the render loop multiplies by sizeScale like every other collapsed
     // width. Measured in the widest-digit form so the width does not wobble as
     // the digits change.
+    //
+    // Which readings go on the left:
+    //  - no lyric line on screen and MediaPillInfo on: clock and weather, the same
+    //    readings as the idle strip, so playing a video does not hide them;
+    //  - otherwise, with MediaPillClock on: the clock alone (room for the lyrics);
+    //  - otherwise nothing, and the pill is exactly the old 150px.
     MediaPillMetrics MeasureMediaPill(const SharedState& state, const Settings& settings) {
-        (void)state;
         MediaPillMetrics metrics;
-        if (!settings.mediaPillClock) {
+        const bool infoMode = settings.mediaPillInfo && !CollapsedLyricsActive(state, settings);
+        if (!infoMode && !settings.mediaPillClock) {
             return metrics;
         }
 
         EnsureTextFormats(settings.sizeScale, settings.fontFamily, settings.textScale);
         IDWriteTextFormat* fmt = idleTextFormat_ ? idleTextFormat_.Get() : smallTextFormat_.Get();
 
+        // The idle strip is never on screen together with the media pill, and the
+        // caches are keyed on the text, so sharing them costs nothing.
         SYSTEMTIME local = {};
         GetLocalTime(&local);
-        const std::wstring clock = FormatIslandTime(local, settings.clockFollowSystem,
-                                                    settings.use24HourClock, settings.showSeconds);
-        metrics.clockWidth =
-            MeasureTextWidthCached(WidestDigitForm(clock), fmt, idleClockWidthCache_);
+        MediaPillSlot clock;
+        clock.text = FormatIslandTime(local, settings.clockFollowSystem,
+                                      settings.use24HourClock, settings.showSeconds);
+        clock.width = MeasureTextWidthCached(WidestDigitForm(clock.text), fmt, idleClockWidthCache_);
+        metrics.slots.push_back(std::move(clock));
 
-        float section = MediaPillLayout::kClockPadLeft + metrics.clockWidth +
-                        MediaPillLayout::kSlotGap + MediaPillLayout::kDividerWidth;
+        if (infoMode && settings.weather) {
+            MediaPillSlot weather;
+            weather.text = IdleWeatherLabel(state, NowSeconds());
+            weather.width = MeasureTextWidthCached(WidestDigitForm(weather.text), fmt, idleWeatherWidthCache_);
+            weather.colorFont = true;
+            metrics.slots.push_back(std::move(weather));
+        }
+
+        float section = MediaPillLayout::kClockPadLeft;
+        for (size_t i = 0; i < metrics.slots.size(); ++i) {
+            if (i > 0) section += MediaPillLayout::kSlotGap;
+            section += metrics.slots[i].width + MediaPillLayout::kSlotGap + MediaPillLayout::kDividerWidth;
+        }
         section = std::ceil(section / MediaPillLayout::kWidthQuantum) * MediaPillLayout::kWidthQuantum;
         metrics.sectionWidth = section;
         metrics.totalWidth = MediaPillLayout::kBaseWidth + section;
         return metrics;
+    }
+
+    // "☀️ 12°", or the placeholder while there is no fresh reading. Same text as
+    // the idle strip shows.
+    std::wstring IdleWeatherLabel(const SharedState& state, double now) {
+        const bool hasData = state.weather.hasData && (now - state.weather.lastUpdated < 3600.0);
+        wchar_t label[32] = {};
+        if (hasData) {
+            std::wstring icon = L"\U0001F321️";
+            std::wstring desc = state.weather.weatherDesc;
+            GetWeatherIconAndText(state.weather.weatherCode, icon, desc);
+            swprintf_s(label, L"%s %.0f\x00B0", icon.c_str(), state.weather.temperature);
+        } else {
+            wcscpy_s(label, ARRAYSIZE(label), L"\U0001F321️ --\x00B0");
+        }
+        return label;
     }
 
    private:
@@ -17156,7 +17201,7 @@ class Renderer {
             artBadgeAlpha_ = 0.0f;
         }
         float pillClockSection = 0.0f;
-        if (settings.mediaPillClock && idleTextFormat_) {
+        if (idleTextFormat_) {
             pillClockSection = MeasureMediaPill(state, settings).sectionWidth;
         }
         const D2D1_RECT_F collapsedArtRect = D2D1::RectF(
@@ -17479,10 +17524,10 @@ class Renderer {
 
             const float cy = (rect.top + rect.bottom) * 0.5f;
 
-            // Optional clock section on the left. Zero wide when the option is
-            // off, so the cover sits exactly where it always did.
+            // Optional info section on the left (clock, weather). Zero wide when
+            // there is nothing to show, so the cover sits exactly where it always did.
             MediaPillMetrics pillMetrics;
-            if (settings.mediaPillClock && idleTextFormat_) {
+            if (idleTextFormat_) {
                 pillMetrics = MeasureMediaPill(state, settings);
             }
             const float clockSection = pillMetrics.sectionWidth;
@@ -17526,35 +17571,37 @@ class Renderer {
                 }
             }
 
-            // Clock + divider on the left, same face, size and time format as the
-            // idle strip. On hover the collapsed layer fades out and the normal
-            // player shows.
-            if (clockSection > 0.0f) {
-                SYSTEMTIME local = {};
-                GetLocalTime(&local);
-                const std::wstring clockText = FormatIslandTime(local, settings.clockFollowSystem,
-                                                                settings.use24HourClock,
-                                                                settings.showSeconds);
-                const float clockLeft = rect.left + MediaPillLayout::kClockPadLeft;
-                textBrush_->SetOpacity(0.96f);
-                target_->DrawTextW(clockText.c_str(), static_cast<UINT32>(clockText.size()),
-                                   idleTextFormat_.Get(),
-                                   D2D1::RectF(clockLeft, rect.top, clockLeft + pillMetrics.clockWidth, rect.bottom),
-                                   textBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_NONE);
-                textBrush_->SetOpacity(1.0f);
-
+            // Info slots on the left (clock, weather), each followed by a divider,
+            // same face, size and formats as the idle strip. On hover the collapsed
+            // layer fades out and the normal player shows.
+            if (clockSection > 0.0f && !pillMetrics.slots.empty()) {
                 ComPtr<ID2D1SolidColorBrush> divider;
                 target_->CreateSolidColorBrush(
                     WithAlpha(material_.hairline, material_.hairline.a * settingsOpacity_), &divider);
-                if (divider) {
-                    const float divX = clockLeft + pillMetrics.clockWidth + MediaPillLayout::kSlotGap;
-                    const float divW = MediaPillLayout::kDividerWidth;
-                    target_->FillRoundedRectangle(
-                        D2D1::RoundedRect(D2D1::RectF(divX, rect.top + MediaPillLayout::kDividerInsetY,
-                                                      divX + divW, rect.bottom - MediaPillLayout::kDividerInsetY),
-                                          divW * 0.5f, divW * 0.5f),
-                        divider.Get());
+
+                float slotX = rect.left + MediaPillLayout::kClockPadLeft;
+                textBrush_->SetOpacity(0.96f);
+                for (size_t i = 0; i < pillMetrics.slots.size(); ++i) {
+                    const MediaPillSlot& slot = pillMetrics.slots[i];
+                    if (i > 0) slotX += MediaPillLayout::kSlotGap;
+                    target_->DrawTextW(slot.text.c_str(), static_cast<UINT32>(slot.text.size()),
+                                       idleTextFormat_.Get(),
+                                       D2D1::RectF(slotX, rect.top, slotX + slot.width, rect.bottom),
+                                       textBrush_.Get(),
+                                       slot.colorFont ? D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT
+                                                      : D2D1_DRAW_TEXT_OPTIONS_NONE);
+                    slotX += slot.width + MediaPillLayout::kSlotGap;
+                    if (divider) {
+                        const float divW = MediaPillLayout::kDividerWidth;
+                        target_->FillRoundedRectangle(
+                            D2D1::RoundedRect(D2D1::RectF(slotX, rect.top + MediaPillLayout::kDividerInsetY,
+                                                          slotX + divW, rect.bottom - MediaPillLayout::kDividerInsetY),
+                                              divW * 0.5f, divW * 0.5f),
+                            divider.Get());
+                    }
+                    slotX += MediaPillLayout::kDividerWidth;
                 }
+                textBrush_->SetOpacity(1.0f);
             }
 
             target_->PopLayer();
@@ -25067,10 +25114,8 @@ DWORD WINAPI RenderThreadProc(void*) {
                 primary.height = MediaLayout::kExpandedHeight * g_settings.sizeScale;
                 // (Immersive lyrics: the island keeps its normal 380px width.)
             } else {
-                // Optional clock section on the left of the collapsed pill.
-                const float clockSection = g_settings.mediaPillClock
-                    ? renderer.MeasureMediaPill(snapshot, g_settings).sectionWidth
-                    : 0.0f;
+                // Optional info section (clock, weather) on the left of the collapsed pill.
+                const float clockSection = renderer.MeasureMediaPill(snapshot, g_settings).sectionWidth;
                 // The lyrics thread only works while lyrics are on screen. The
                 // pill now stays narrow until lyrics are found, so keep it looking
                 // for as long as the collapsed pill could show them.
@@ -25080,7 +25125,7 @@ DWORD WINAPI RenderThreadProc(void*) {
                 if (CollapsedLyricsActive(snapshot, g_settings)) {
                     // Collapsed but carrying lyrics: wider pill, same height.
                     primary.width = (kCollapsedLyricsWidth + clockSection) * g_settings.sizeScale;
-                } else if (g_settings.mediaPillClock) {
+                } else if (clockSection > 0.0f) {
                     primary.width = (MediaPillLayout::kBaseWidth + clockSection) * g_settings.sizeScale;
                 }
             }
@@ -25350,7 +25395,7 @@ DWORD WINAPI RenderThreadProc(void*) {
         static SYSTEMTIME prevTime = {};
         const bool clockOnScreen = !stripActive &&
             (primary.kind == IslandKind::Idle ||
-             (primary.kind == IslandKind::Media && g_settings.mediaPillClock));
+             (primary.kind == IslandKind::Media && (g_settings.mediaPillClock || g_settings.mediaPillInfo)));
         if (clockOnScreen && !isHidden) {
             SYSTEMTIME local = {};
             GetLocalTime(&local);

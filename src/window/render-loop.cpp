@@ -567,10 +567,8 @@ DWORD WINAPI RenderThreadProc(void*) {
                 primary.height = MediaLayout::kExpandedHeight * g_settings.sizeScale;
                 // (Immersive lyrics: the island keeps its normal 380px width.)
             } else {
-                // Optional clock section on the left of the collapsed pill.
-                const float clockSection = g_settings.mediaPillClock
-                    ? renderer.MeasureMediaPill(snapshot, g_settings).sectionWidth
-                    : 0.0f;
+                // Optional info section (clock, weather) on the left of the collapsed pill.
+                const float clockSection = renderer.MeasureMediaPill(snapshot, g_settings).sectionWidth;
                 // The lyrics thread only works while lyrics are on screen. The
                 // pill now stays narrow until lyrics are found, so keep it looking
                 // for as long as the collapsed pill could show them.
@@ -580,7 +578,7 @@ DWORD WINAPI RenderThreadProc(void*) {
                 if (CollapsedLyricsActive(snapshot, g_settings)) {
                     // Collapsed but carrying lyrics: wider pill, same height.
                     primary.width = (kCollapsedLyricsWidth + clockSection) * g_settings.sizeScale;
-                } else if (g_settings.mediaPillClock) {
+                } else if (clockSection > 0.0f) {
                     primary.width = (MediaPillLayout::kBaseWidth + clockSection) * g_settings.sizeScale;
                 }
             }
@@ -850,7 +848,7 @@ DWORD WINAPI RenderThreadProc(void*) {
         static SYSTEMTIME prevTime = {};
         const bool clockOnScreen = !stripActive &&
             (primary.kind == IslandKind::Idle ||
-             (primary.kind == IslandKind::Media && g_settings.mediaPillClock));
+             (primary.kind == IslandKind::Media && (g_settings.mediaPillClock || g_settings.mediaPillInfo)));
         if (clockOnScreen && !isHidden) {
             SYSTEMTIME local = {};
             GetLocalTime(&local);

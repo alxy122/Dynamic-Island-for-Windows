@@ -115,9 +115,16 @@ struct SwapTextState {
     MarqueeLayoutCache prevCache;     // layout cache for the outgoing text
 };
 
+// One reading in the info section of the collapsed media pill (clock, weather).
+struct MediaPillSlot {
+    std::wstring text;
+    float width = 0.0f;      // measured in the widest-digit form
+    bool colorFont = false;  // contains an emoji
+};
+
 struct MediaPillMetrics {
-    float clockWidth = 0.0f;
-    float sectionWidth = 0.0f;                       // clock + divider block on the left
+    std::vector<MediaPillSlot> slots;                // left to right, each followed by a divider
+    float sectionWidth = 0.0f;                       // slots + dividers block on the left
     float totalWidth = MediaPillLayout::kBaseWidth;  // content space, before sizeScale
 };
 
