@@ -1,0 +1,6 @@
+# Keep sources and the generated mod file LF on every machine, so build.ps1 -Check
+# compares like with like.
+src/** text eol=lf
+*.wh.cpp text eol=lf
+build.ps1 text eol=lf
+DEVELOPMENT.md text eol=lf

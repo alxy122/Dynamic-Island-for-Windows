@@ -1,0 +1,80 @@
+# Build order for dynamic-island-for-windows.wh.cpp (see build.ps1).
+# Plain lines are copied verbatim. @header/@readme/@settings get their
+# Windhawk comment wrapper, @namespace-begin/@namespace-end open and close
+# the anonymous namespace. render/renderer/* is one class split across files.
+@header header.txt
+@readme readme.md
+@settings settings.yaml
+prelude.cpp
+@namespace-begin
+core/constants-layout.cpp
+core/types.cpp
+core/globals.cpp
+core/state-helpers.cpp
+core/localization.cpp
+core/hit-testing.cpp
+core/strings-colors.cpp
+core/monitors.cpp
+core/settings-load.cpp
+window/backdrop.cpp
+window/placement.cpp
+system/images-icons.cpp
+media/media-sources.cpp
+media/media-thread.cpp
+system/do-not-disturb.cpp
+system/notifications.cpp
+system/bluetooth.cpp
+media/audio-spectrum.cpp
+services/http.cpp
+services/weather.cpp
+lyrics/lyrics-fetch.cpp
+lyrics/lyrics-cache.cpp
+lyrics/lyrics-thread.cpp
+media/audio-capture.cpp
+system/battery-gpu-net.cpp
+system/volume.cpp
+system/system-snapshot.cpp
+system/privacy.cpp
+system/clipboard-toasts.cpp
+lookup/lookup-rows.cpp
+lookup/lookup-engine.cpp
+lookup/lookup-panel.cpp
+songid/shazam.cpp
+window/actions.cpp
+window/context-menu.cpp
+render/render-types.cpp
+render/renderer/01-core.cpp
+render/renderer/02-material.cpp
+render/renderer/03-pill-surface.cpp
+render/renderer/04-calendar.cpp
+render/renderer/05-weather.cpp
+render/renderer/06-file-tray.cpp
+render/renderer/07-hardware.cpp
+render/renderer/08-lyrics-tab.cpp
+render/renderer/12-time.cpp
+render/renderer/13-idle.cpp
+render/renderer/14-game-overlay.cpp
+render/renderer/15-tabs.cpp
+render/renderer/16-media.cpp
+render/renderer/17-media-lyrics.cpp
+render/renderer/18-source-dock.cpp
+render/renderer/19-media-controls.cpp
+render/renderer/20-title-progress.cpp
+render/renderer/21-album-art.cpp
+render/renderer/22-spectrum.cpp
+render/renderer/23-level-banner.cpp
+render/renderer/24-bitmaps-text.cpp
+render/renderer/25-status-cards.cpp
+render/renderer/26-lookup.cpp
+render/renderer/27-song-id.cpp
+render/renderer/28-battery-progress.cpp
+render/renderer/29-members.cpp
+window/activities.cpp
+window/input-hooks.cpp
+file-tray/store.cpp
+file-tray/drag-drop.cpp
+window/wndproc.cpp
+window/render-loop.cpp
+core/threads.cpp
+@namespace-end
+entry.cpp
