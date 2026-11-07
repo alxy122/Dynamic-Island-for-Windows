@@ -266,7 +266,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 bool mediaActive = false;
                 {
                     std::lock_guard lock(g_stateMutex);
-                    mediaActive = g_settings.media && g_state.media.available;
+                    mediaActive = MediaVisible(g_state, g_settings);
                 }
 
                 const int currentTab = NormalizedTabIndex(g_settings);
@@ -329,7 +329,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 bool mediaActive = false;
                 {
                     std::lock_guard lock(g_stateMutex);
-                    mediaActive = g_settings.media && g_state.media.available;
+                    mediaActive = MediaVisible(g_state, g_settings);
                 }
 
                 const int currentTab = NormalizedTabIndex(g_settings);
@@ -410,7 +410,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             bool mediaActive = false;
             {
                 std::lock_guard lock(g_stateMutex);
-                mediaActive = g_settings.media && g_state.media.available;
+                mediaActive = MediaVisible(g_state, g_settings);
             }
             const int currentTab = NormalizedTabIndex(g_settings);
 
@@ -577,7 +577,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 std::vector<IslandKind> kinds;
                 {
                     std::lock_guard lock(g_stateMutex);
-                    mediaActive = g_settings.media && g_state.media.available;
+                    mediaActive = MediaVisible(g_state, g_settings);
                     kinds = ChooseActivities(g_state, g_settings, NowSeconds());
                 }
 

@@ -262,6 +262,9 @@
   - MediaPillClock: false
     $name: Show clock in the collapsed media pill
     $description: While media is playing, the collapsed pill also shows the current time on the left, separated from the album cover by a thin divider. Hovering still opens the normal player. Uses the same 12h/24h and seconds options as the clock below. Off by default.
+  - MediaPausedShowsClock: true
+    $name: Show clock, weather and appointments while paused
+    $description: "When the player is paused, the island switches back to the idle view (clock, weather, next appointment) instead of keeping the paused track and its lyrics on screen. Playback resumes the media view on its own. Turn off to keep the old behaviour."
   - Volume: true
     $name: Volume slider flyout
     $description: Shows a volume slider banner on the island when adjusting system volume. Disable if you prefer the default Windows volume flyout.

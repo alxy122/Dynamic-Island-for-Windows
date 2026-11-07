@@ -324,7 +324,7 @@ DWORD WINAPI RenderThreadProc(void*) {
 
         const std::vector<IslandKind> kinds = ChooseActivities(snapshot, g_settings, now);
         g_lyricsTabAvailable.store(
-            g_settings.lyrics && g_settings.media && snapshot.media.available,
+            g_settings.lyrics && MediaVisible(snapshot, g_settings),
             std::memory_order_relaxed);
         Activity primary = ActivityForKind(kinds[0], g_settings, snapshot);
         std::optional<Activity> secondary;

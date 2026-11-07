@@ -380,6 +380,9 @@ We love community contributions! To ensure high-quality updates, please follow t
   - MediaPillClock: false
     $name: Show clock in the collapsed media pill
     $description: While media is playing, the collapsed pill also shows the current time on the left, separated from the album cover by a thin divider. Hovering still opens the normal player. Uses the same 12h/24h and seconds options as the clock below. Off by default.
+  - MediaPausedShowsClock: true
+    $name: Show clock, weather and appointments while paused
+    $description: "When the player is paused, the island switches back to the idle view (clock, weather, next appointment) instead of keeping the paused track and its lyrics on screen. Playback resumes the media view on its own. Turn off to keep the old behaviour."
   - Volume: true
     $name: Volume slider flyout
     $description: Shows a volume slider banner on the island when adjusting system volume. Disable if you prefer the default Windows volume flyout.
@@ -1328,6 +1331,7 @@ struct Settings {
     bool clockFollowSystem = true;
     std::wstring dateFormat;        // empty = locale default
     bool mediaPillClock = false;    // show the clock inside the collapsed media pill
+    bool mediaPausedShowsClock = true;  // paused player -> idle view (Modules.MediaPausedShowsClock)
     bool dateFirst = false;
     int firstDayOfWeek = -1;        // 0 = Sunday .. 6 = Saturday, -1 = follow Windows
 
@@ -1882,6 +1886,33 @@ double NowSeconds() {
     using clock = std::chrono::steady_clock;
     static const auto start = clock::now();
     return std::chrono::duration<double>(clock::now() - start).count();
+}
+
+// Is there a media session the island should be showing right now?
+//
+// A paused player keeps its session, so media.available stays true for hours and
+// the island used to sit on the paused track (and a frozen lyric line) for as
+// long. With Modules.MediaPausedShowsClock a session only counts while it plays,
+// plus a short grace so the brief non-playing blip between two tracks does not
+// make the island flap to the clock and back. Every place that asks "is the media
+// view up?" goes through here, so clicks, tabs and lyrics all agree with what is
+// actually drawn (a click on the idle clock must never hit the player's controls).
+constexpr double kMediaPauseGraceSeconds = 2.5;
+std::atomic<double> g_mediaLastPlayingAt{-1e9};
+
+bool MediaVisible(const SharedState& state, const Settings& settings) {
+    if (!settings.media || !state.media.available) {
+        return false;
+    }
+    if (!settings.mediaPausedShowsClock) {
+        return true;
+    }
+    const double now = NowSeconds();
+    if (state.media.playing) {
+        g_mediaLastPlayingAt.store(now, std::memory_order_relaxed);
+        return true;
+    }
+    return now - g_mediaLastPlayingAt.load(std::memory_order_relaxed) < kMediaPauseGraceSeconds;
 }
 
 float Clamp(float v, float lo, float hi) {
@@ -3282,6 +3313,7 @@ void LoadSettings() {
         next.firstDayOfWeek = -1;
     }
     next.mediaPillClock = Wh_GetIntSetting(L"Modules.MediaPillClock") != 0;
+    next.mediaPausedShowsClock = Wh_GetIntSetting(L"Modules.MediaPausedShowsClock") != 0;
 
     // ── Localization (#35) ───────────────────────────────────────────────────
     {
@@ -12965,7 +12997,7 @@ constexpr float kCollapsedLyricsWidth = 320.0f;
 bool CollapsedLyricsActive(const SharedState& state, const Settings& settings) {
     // Stays wide for as long as media is available. If there are no lyrics to
     // show, DrawCollapsedLyrics shows the media title instead.
-    return settings.collapsedLyrics && settings.media && state.media.available;
+    return settings.collapsedLyrics && MediaVisible(state, settings);
 }
 
 // One pre-built lyric line. Built once when the line changes, then reused every
@@ -22406,7 +22438,7 @@ std::vector<IslandKind> ChooseActivities(const SharedState& state, const Setting
     // already gated on MediaExpandBlocked, but with MediaAutoExpand off by
     // default that gate never fired — so "firefox.exe" in the list looked like
     // a no-op while the pill still switched to music mode.
-    if (settings.media && state.media.available && !MediaExpandBlocked(state.media)) {
+    if (MediaVisible(state, settings) && !MediaExpandBlocked(state.media)) {
         activities.push_back(IslandKind::Media);
     }
 
@@ -23780,7 +23812,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 bool mediaActive = false;
                 {
                     std::lock_guard lock(g_stateMutex);
-                    mediaActive = g_settings.media && g_state.media.available;
+                    mediaActive = MediaVisible(g_state, g_settings);
                 }
 
                 const int currentTab = NormalizedTabIndex(g_settings);
@@ -23843,7 +23875,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 bool mediaActive = false;
                 {
                     std::lock_guard lock(g_stateMutex);
-                    mediaActive = g_settings.media && g_state.media.available;
+                    mediaActive = MediaVisible(g_state, g_settings);
                 }
 
                 const int currentTab = NormalizedTabIndex(g_settings);
@@ -23924,7 +23956,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             bool mediaActive = false;
             {
                 std::lock_guard lock(g_stateMutex);
-                mediaActive = g_settings.media && g_state.media.available;
+                mediaActive = MediaVisible(g_state, g_settings);
             }
             const int currentTab = NormalizedTabIndex(g_settings);
 
@@ -24091,7 +24123,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 std::vector<IslandKind> kinds;
                 {
                     std::lock_guard lock(g_stateMutex);
-                    mediaActive = g_settings.media && g_state.media.available;
+                    mediaActive = MediaVisible(g_state, g_settings);
                     kinds = ChooseActivities(g_state, g_settings, NowSeconds());
                 }
 
@@ -24790,7 +24822,7 @@ DWORD WINAPI RenderThreadProc(void*) {
 
         const std::vector<IslandKind> kinds = ChooseActivities(snapshot, g_settings, now);
         g_lyricsTabAvailable.store(
-            g_settings.lyrics && g_settings.media && snapshot.media.available,
+            g_settings.lyrics && MediaVisible(snapshot, g_settings),
             std::memory_order_relaxed);
         Activity primary = ActivityForKind(kinds[0], g_settings, snapshot);
         std::optional<Activity> secondary;

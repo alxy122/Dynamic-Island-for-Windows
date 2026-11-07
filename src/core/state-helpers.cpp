@@ -4,6 +4,33 @@ double NowSeconds() {
     return std::chrono::duration<double>(clock::now() - start).count();
 }
 
+// Is there a media session the island should be showing right now?
+//
+// A paused player keeps its session, so media.available stays true for hours and
+// the island used to sit on the paused track (and a frozen lyric line) for as
+// long. With Modules.MediaPausedShowsClock a session only counts while it plays,
+// plus a short grace so the brief non-playing blip between two tracks does not
+// make the island flap to the clock and back. Every place that asks "is the media
+// view up?" goes through here, so clicks, tabs and lyrics all agree with what is
+// actually drawn (a click on the idle clock must never hit the player's controls).
+constexpr double kMediaPauseGraceSeconds = 2.5;
+std::atomic<double> g_mediaLastPlayingAt{-1e9};
+
+bool MediaVisible(const SharedState& state, const Settings& settings) {
+    if (!settings.media || !state.media.available) {
+        return false;
+    }
+    if (!settings.mediaPausedShowsClock) {
+        return true;
+    }
+    const double now = NowSeconds();
+    if (state.media.playing) {
+        g_mediaLastPlayingAt.store(now, std::memory_order_relaxed);
+        return true;
+    }
+    return now - g_mediaLastPlayingAt.load(std::memory_order_relaxed) < kMediaPauseGraceSeconds;
+}
+
 float Clamp(float v, float lo, float hi) {
     return std::max(lo, std::min(hi, v));
 }

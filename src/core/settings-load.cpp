@@ -299,6 +299,7 @@ void LoadSettings() {
         next.firstDayOfWeek = -1;
     }
     next.mediaPillClock = Wh_GetIntSetting(L"Modules.MediaPillClock") != 0;
+    next.mediaPausedShowsClock = Wh_GetIntSetting(L"Modules.MediaPausedShowsClock") != 0;
 
     // ── Localization (#35) ───────────────────────────────────────────────────
     {
