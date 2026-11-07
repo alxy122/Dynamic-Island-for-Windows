@@ -158,6 +158,7 @@
             std::vector<int> activeTabs;
             activeTabs.push_back(3); // Time (shown first when the island expands/on hover)
             activeTabs.push_back(0); // Calendar
+            if (ClaudeUsageTabEnabled(settings)) activeTabs.push_back(7);  // Claude usage
             if (settings.weather) activeTabs.push_back(1);
             if (settings.hardwareMonitorModule) activeTabs.push_back(2);
             if (settings.fileTrayModule) activeTabs.push_back(4);
@@ -178,6 +179,7 @@
             DrawTabTransition(1, tabIdx, activeTabs, fullRect, now, [&](int activeTabId) {
                 if (activeTabId == 3) DrawTimeDashboard(state, fullRect, settings, now, scale, local);
                 else if (activeTabId == 0) DrawCalendarDashboard(state, fullRect, settings, now, scale, local);
+                else if (activeTabId == 7) DrawClaudeUsageDashboard(state, fullRect, settings, scale);
                 else if (activeTabId == 1) DrawWeatherDashboard(state, fullRect, settings, now, scale, hasWeather, wIcon, wText);
                 else if (activeTabId == 2) DrawHardwareMonitorDashboard(state, fullRect, settings, scale);
                 else if (activeTabId == 4) DrawFileTrayDashboard(state, fullRect, settings, scale);

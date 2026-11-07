@@ -247,6 +247,8 @@ struct Settings {
     bool weather = true;
     std::wstring weatherCity;
     bool weatherFahrenheit = false;
+    bool claudeUsage = false;                         // Modules.ClaudeUsage
+    std::wstring claudeUsageFile;                     // Modules.ClaudeUsageFile
     bool lyrics = false;
     bool lyricsVisualizer = true;
     bool karaokeLyrics = true;
@@ -647,6 +649,18 @@ struct LookupUiState {
 };
 LookupUiState g_lookupUi;
 
+// Plan limits as mirrored by the Claude Code status line script (see usage::).
+struct ClaudeUsageSnapshot {
+    bool hasData = false;
+    bool fiveOk = false;
+    bool sevenOk = false;
+    double fivePct = 0.0;
+    double sevenPct = 0.0;
+    int64_t fiveResetsAt = 0;
+    int64_t sevenResetsAt = 0;
+    int64_t updatedAt = 0;
+};
+
 enum class SongIdStatus {
     Listening,
     Matching,
@@ -688,6 +702,7 @@ struct SharedState {
     ProgressSnapshot progress;
     SystemSnapshot system;
     WeatherSnapshot weather;
+    ClaudeUsageSnapshot claudeUsage;
     LyricsSnapshot lyrics;
     LookupSnapshot lookup;
     std::vector<LookupRecent> lookupRecent;  // newest first, guarded by g_stateMutex

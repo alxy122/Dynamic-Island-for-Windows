@@ -394,6 +394,8 @@ void LoadSettings() {
     next.weather = Wh_GetIntSetting(L"Modules.Weather") != 0;
     next.weatherCity = GetStringSettingWithFallback(L"Modules.WeatherCity", L"Weather.WeatherCity", L"CalendarWeather.WeatherCity");
     next.weatherFahrenheit = Wh_GetIntSetting(L"Modules.WeatherFahrenheit") != 0;
+    next.claudeUsage = Wh_GetIntSetting(L"Modules.ClaudeUsage") != 0;
+    next.claudeUsageFile = GetStringSettingCopy(L"Modules.ClaudeUsageFile");
     next.lyrics = Wh_GetIntSetting(L"Modules.Lyrics") != 0;
     next.lyricsVisualizer = Wh_GetIntSetting(L"Modules.LyricsVisualizer") != 0;
     next.karaokeLyrics = Wh_GetIntSetting(L"Modules.KaraokeLyrics") != 0;
