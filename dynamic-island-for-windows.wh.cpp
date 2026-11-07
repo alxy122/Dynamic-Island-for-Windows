@@ -73,6 +73,7 @@ The Dynamic Island intelligently expands to display context-aware dashboards. Yo
 - **Windhawk Settings:** Visit the Mod Settings tab to change the island's Position, Size Scale, Refresh Rate (Target FPS), Animation Style (Smooth/Default/Bouncy/Snappy), Animation Speed, and toggle specific modules. You can also perfectly align the island using the `Offset X` and `Offset Y` settings, and select exactly which monitor the island should appear on (including a "Follow Mouse" mode!).
 - **Blur & Acrylic need Transparency effects:** Windows does not enable this by default on every PC, and the Blur and Acrylic backdrop will not show without it (you will only see a flat tint instead). Turn it on in **Settings > Personalization > Colors > Transparency effects** (on Windows 11 you can also find it under **Settings > Accessibility > Visual effects > Transparency effects**). Also make sure **Battery saver** is off, because it disables these effects too. Then pick a material under **Mod Settings > Themes > Backdrop material**; the change applies live, no restart needed.
 - **Notifications:** Windows must allow apps to read notifications: turn on **Settings > Privacy & security > Notifications > "Let apps access your notifications"**. Without that permission Windows denies the listener and the module stays silent. Nothing needs to be added to the process inclusion list; the island runs in its own process and reads notifications from there. Note: notifications from command-line consoles and terminal hosts (PowerShell, cmd.exe, conhost) are filtered out by default to avoid toast spam from terminal scripts and build jobs.
+- **Claude usage tab:** Shows how much of your Claude plan's 5-hour session limit and weekly limit is used, and when each resets (as percentages, Anthropic does not publish token counts). Claude Code passes these numbers only to its status line, so a tiny script has to copy them into a file the mod reads. Save `claude-usage-statusline.ps1` somewhere permanent and point Claude Code's `statusLine` setting in `~/.claude/settings.json` at it (`"statusLine": {"type": "command", "command": "powershell -NoProfile -ExecutionPolicy Bypass -File C:\\path\\to\\claude-usage-statusline.ps1"}`). Then switch on "Claude usage tab" under Modules. Numbers refresh whenever Claude Code runs, and only for Pro/Max logins.
 - **Quick Hide/Show:** Right-click the island and choose "Hide Island" to collapse it completely — CPU usage drops to ~0% while hidden since the mod fully parks its render thread. Bring it back instantly with the configurable hotkey (default **Ctrl+Alt+D**, changeable in the **Shortcuts** settings tab). Because a hidden island can't be right-clicked, the hotkey is the *only* way back once hidden — if you turn the hotkey off while hidden, re-enable it (or disable the mod) from Windhawk's settings.
 
 ---
@@ -381,6 +382,12 @@ We love community contributions! To ensure high-quality updates, please follow t
   - MediaPillClock: false
     $name: Show clock in the collapsed media pill
     $description: While media is playing, the collapsed pill also shows the current time on the left, separated from the album cover by a thin divider. Hovering still opens the normal player. Uses the same 12h/24h and seconds options as the clock below. Off by default.
+  - ClaudeUsage: false
+    $name: Claude usage tab (session and weekly limit)
+    $description: "Adds a tab with how much of your Claude plan's 5-hour session limit and weekly limit is used, and when each resets. Anthropic shows these as percentages, not token counts. The numbers come from a small file that Claude Code's status line script writes (claude-usage-statusline.ps1, see the mod readme), so they only update while Claude Code is in use."
+  - ClaudeUsageFile: ""
+    $name: Claude usage file (optional)
+    $description: "Path of the JSON file written by the status line script. Leave empty for %USERPROFILE%\\.claude\\island-usage.json."
   - Volume: true
     $name: Volume slider flyout
     $description: Shows a volume slider banner on the island when adjusting system volume. Disable if you prefer the default Windows volume flyout.
@@ -1282,6 +1289,8 @@ struct Settings {
     std::wstring weatherCity;
     bool weatherFahrenheit = false;
     bool appointments = false;                        // Modules.Appointments
+    bool claudeUsage = false;                         // Modules.ClaudeUsage
+    std::wstring claudeUsageFile;                     // Modules.ClaudeUsageFile
     std::vector<std::wstring> appointmentCalendars;   // Modules.AppointmentCalendars[i]
     bool lyrics = false;
     bool lyricsVisualizer = true;
@@ -1699,6 +1708,18 @@ struct CalendarSnapshot {
     std::shared_ptr<const std::vector<CalEvent>> events;
 };
 
+// Plan limits as mirrored by the Claude Code status line script (see usage::).
+struct ClaudeUsageSnapshot {
+    bool hasData = false;
+    bool fiveOk = false;
+    bool sevenOk = false;
+    double fivePct = 0.0;
+    double sevenPct = 0.0;
+    int64_t fiveResetsAt = 0;
+    int64_t sevenResetsAt = 0;
+    int64_t updatedAt = 0;
+};
+
 enum class SongIdStatus {
     Listening,
     Matching,
@@ -1741,6 +1762,7 @@ struct SharedState {
     SystemSnapshot system;
     WeatherSnapshot weather;
     CalendarSnapshot calendar;
+    ClaudeUsageSnapshot claudeUsage;
     LyricsSnapshot lyrics;
     LookupSnapshot lookup;
     std::vector<LookupRecent> lookupRecent;  // newest first, guarded by g_stateMutex
@@ -1814,6 +1836,7 @@ HANDLE g_mediaThread = nullptr;
 HANDLE g_audioThread = nullptr;
 HANDLE g_weatherThread = nullptr;
 HANDLE g_calendarThread = nullptr;
+HANDLE g_usageThread = nullptr;
 HANDLE g_calendarRefreshEvent = nullptr;  // wakes CalendarThreadProc
 HANDLE g_lyricsThread = nullptr;
 HANDLE g_notificationThread = nullptr;
@@ -2068,9 +2091,14 @@ bool AppointmentsTabEnabled(const Settings& settings) {
     return settings.appointments && !settings.appointmentCalendars.empty();
 }
 
+bool ClaudeUsageTabEnabled(const Settings& settings) {
+    return settings.claudeUsage;
+}
+
 int ActiveTabCount(const Settings& settings) {
     int count = 2;  // primary (media or clock) + calendar
     if (AppointmentsTabEnabled(settings)) ++count;
+    if (ClaudeUsageTabEnabled(settings)) ++count;
     if (settings.weather) ++count;
     if (settings.hardwareMonitorModule) ++count;
     if (settings.fileTrayModule) ++count;
@@ -2084,7 +2112,7 @@ int NormalizedTabIndex(const Settings& settings) {
     return ((raw % total) + total) % total;
 }
 
-// Tab order is always: primary, calendar, appointments?, weather?, hardware?, file tray?
+// Tab order is always: primary, calendar, appointments?, Claude usage?, weather?, hardware?, file tray?
 // The expensive GPU / network counters are only sampled while the hardware card
 // is actually on screen, so that check needs the card's real index rather than
 // assuming it is the last tab -- which stopped being true once the File Tray
@@ -2101,7 +2129,7 @@ int HardwareMonitorTabIndex(const Settings& settings) {
     if (!settings.hardwareMonitorModule) {
         return -1;
     }
-    return 2 + (AppointmentsTabEnabled(settings) ? 1 : 0) +
+    return 2 + (AppointmentsTabEnabled(settings) ? 1 : 0) + (ClaudeUsageTabEnabled(settings) ? 1 : 0) +
            (settings.weather ? 1 : 0) + MediaTabIndex(settings);
 }
 
@@ -2109,7 +2137,7 @@ int FileTrayTabIndex(const Settings& settings) {
     if (!settings.fileTrayModule) {
         return -1;
     }
-    return 2 + (AppointmentsTabEnabled(settings) ? 1 : 0) +
+    return 2 + (AppointmentsTabEnabled(settings) ? 1 : 0) + (ClaudeUsageTabEnabled(settings) ? 1 : 0) +
            (settings.weather ? 1 : 0) + (settings.hardwareMonitorModule ? 1 : 0) + MediaTabIndex(settings);
 }
 
@@ -2263,6 +2291,14 @@ const wchar_t* Loc(const wchar_t* english) {
         {L"No upcoming appointments", {nullptr, L"Aucun rendez-vous à venir", L"Sin citas próximas", L"Keine anstehenden Termine", L"Nenhum compromisso próximo", L"Nessun appuntamento in arrivo", L"Нет предстоящих событий", L"Yaklaşan randevu yok", L"कोई आगामी अपॉइंटमेंट नहीं", L"没有即将到来的日程", L"今後の予定はありません", L"예정된 일정이 없습니다"}},
         {L"+%d more", {nullptr, L"+%d de plus", L"+%d más", L"+%d weitere", L"+%d mais", L"+%d altri", L"ещё %d", L"+%d daha", L"+%d और", L"还有 %d 项", L"他 %d 件", L"+%d개 더"}},
         {L"Back to top", {nullptr, L"Retour en haut", L"Volver arriba", L"Nach oben", L"Voltar ao topo", L"Torna su", L"Наверх", L"Başa dön", L"शुरू में जाएं", L"回到顶部", L"先頭へ", L"맨 위로"}},
+        {L"Claude usage", {nullptr, L"Utilisation de Claude", L"Uso de Claude", L"Claude-Nutzung", L"Uso do Claude", L"Utilizzo di Claude", nullptr, nullptr, nullptr, nullptr, nullptr, nullptr}},
+        {L"Session", {nullptr, L"Session", L"Sesión", L"Sitzung", L"Sessão", L"Sessione", nullptr, nullptr, nullptr, nullptr, nullptr, nullptr}},
+        {L"Week", {nullptr, L"Semaine", L"Semana", L"Woche", L"Semana", L"Settimana", nullptr, nullptr, nullptr, nullptr, nullptr, nullptr}},
+        {L"Resets in %s", {nullptr, L"Réinitialisation dans %s", L"Se restablece en %s", L"Zurücksetzung in %s", L"Reinicia em %s", L"Si azzera tra %s", nullptr, nullptr, nullptr, nullptr, nullptr, nullptr}},
+        {L"Updated %s ago", {nullptr, L"Mis à jour il y a %s", L"Actualizado hace %s", L"Vor %s aktualisiert", L"Atualizado há %s", L"Aggiornato %s fa", nullptr, nullptr, nullptr, nullptr, nullptr, nullptr}},
+        {L"Waiting for Claude Code", {nullptr, L"En attente de Claude Code", L"Esperando a Claude Code", L"Warte auf Claude Code", L"Aguardando o Claude Code", L"In attesa di Claude Code", nullptr, nullptr, nullptr, nullptr, nullptr, nullptr}},
+        {L"No usage data yet", {nullptr, L"Pas encore de données", L"Aún no hay datos de uso", L"Noch keine Nutzungsdaten", L"Ainda sem dados de uso", L"Ancora nessun dato", nullptr, nullptr, nullptr, nullptr, nullptr, nullptr}},
+        {L"Set up the status line script (see mod settings)", {nullptr, L"Configurez le script de la status line (voir réglages du mod)", L"Configura el script de la status line (ver ajustes del mod)", L"Statusline-Skript einrichten (siehe Mod-Einstellungen)", L"Configure o script da status line (veja as configurações do mod)", L"Configura lo script della status line (vedi impostazioni del mod)", nullptr, nullptr, nullptr, nullptr, nullptr, nullptr}},
         {L"Weather", {nullptr, L"Météo", L"Tiempo", L"Wetter", L"Tempo", L"Meteo", L"Погода", L"Hava", L"मौसम", L"天气", L"天気", L"날씨"}},
         {L"Hardware Monitor", {nullptr, L"Moniteur matériel", L"Monitor de hardware", L"Hardware-Monitor", L"Monitor de hardware", L"Monitor hardware", L"Монитор системы", L"Donanım İzleme", L"हार्डवेयर मॉनिटर", L"硬件监视器", L"ハードウェア モニター", L"하드웨어 모니터"}},
         {L"File Tray", {nullptr, L"Bac à fichiers", L"Bandeja de archivos", L"Dateiablage", L"Bandeja de arquivos", L"Vassoio file", L"Файлы", L"Dosya Tepsisi", L"फ़ाइल ट्रे", L"文件托盘", L"ファイル トレイ", L"파일 트레이"}},
@@ -3443,6 +3479,8 @@ void LoadSettings() {
     next.weatherCity = GetStringSettingWithFallback(L"Modules.WeatherCity", L"Weather.WeatherCity", L"CalendarWeather.WeatherCity");
     next.weatherFahrenheit = Wh_GetIntSetting(L"Modules.WeatherFahrenheit") != 0;
     next.appointments = Wh_GetIntSetting(L"Modules.Appointments") != 0;
+    next.claudeUsage = Wh_GetIntSetting(L"Modules.ClaudeUsage") != 0;
+    next.claudeUsageFile = GetStringSettingCopy(L"Modules.ClaudeUsageFile");
     next.appointmentCalendars.clear();
     for (int i = 0; i < 8; ++i) {
         wchar_t key[64];
@@ -8347,6 +8385,159 @@ DWORD WINAPI CalendarThreadProc(void*) {
         const DWORD r = WaitForMultipleObjects(g_calendarRefreshEvent ? 2 : 1, waits, FALSE, waitMs);
         if (r == WAIT_OBJECT_0) break;
         if (r == WAIT_OBJECT_0 + 1) backoff = 0;  // settings changed: refetch right away
+    }
+    return 0;
+}
+
+// ==USAGE-PARSE-BEGIN==
+// -- Claude usage: reading the limits file (pure, unit-tested off-Windows) -------
+// Claude Code hands its plan limits to the status line script and nowhere else.
+// That script (claude-usage-statusline.ps1) mirrors them into a small JSON file:
+//   {"updated_at":N,"five_hour":{"used_percentage":X,"resets_at":T},"seven_day":{...}}
+// with epoch seconds. This reads that file; it never talks to Anthropic.
+namespace usage {
+
+struct Window {
+    bool ok = false;
+    double pct = 0.0;       // 0..100
+    int64_t resetsAt = 0;   // epoch seconds
+};
+
+struct Data {
+    Window five;
+    Window seven;
+    int64_t updatedAt = 0;
+};
+
+inline bool NumberIn(const std::string& s, size_t from, size_t to, const char* key, double& out) {
+    const std::string k = std::string("\"") + key + "\"";
+    const size_t p = s.find(k, from);
+    if (p == std::string::npos || p >= to) return false;
+    const size_t colon = s.find(':', p + k.size());
+    if (colon == std::string::npos || colon >= to) return false;
+    const char* begin = s.c_str() + colon + 1;
+    char* end = nullptr;
+    const double v = strtod(begin, &end);
+    if (end == begin) return false;
+    out = v;
+    return true;
+}
+
+inline Window ParseWindow(const std::string& s, const char* name) {
+    Window w;
+    const std::string k = std::string("\"") + name + "\"";
+    const size_t p = s.find(k);
+    if (p == std::string::npos) return w;
+    const size_t open = s.find('{', p);
+    if (open == std::string::npos) return w;
+    const size_t close = s.find('}', open);
+    if (close == std::string::npos) return w;
+    double pct = 0.0, reset = 0.0;
+    if (!NumberIn(s, open, close, "used_percentage", pct) || !NumberIn(s, open, close, "resets_at", reset)) return w;
+    w.ok = true;
+    w.pct = pct < 0.0 ? 0.0 : (pct > 100.0 ? 100.0 : pct);
+    w.resetsAt = static_cast<int64_t>(reset);
+    return w;
+}
+
+// True if at least one window was found.
+inline bool Parse(const std::string& json, Data& out) {
+    out = Data();
+    out.five = ParseWindow(json, "five_hour");
+    out.seven = ParseWindow(json, "seven_day");
+    double updated = 0.0;
+    if (NumberIn(json, 0, json.size(), "updated_at", updated)) out.updatedAt = static_cast<int64_t>(updated);
+    return out.five.ok || out.seven.ok;
+}
+
+// "45 min", "3 h 12 min", "2 d 4 h". Rounds up so it never shows 0 before a reset.
+inline std::string Duration(int64_t secs) {
+    if (secs <= 0) return "0 min";
+    const int64_t m = (secs + 59) / 60;
+    if (m < 60) return std::to_string(m) + " min";
+    const int64_t h = m / 60, mm = m % 60;
+    if (h < 48) return std::to_string(h) + " h" + (mm ? " " + std::to_string(mm) + " min" : std::string());
+    const int64_t d = h / 24, hh = h % 24;
+    return std::to_string(d) + " d" + (hh ? " " + std::to_string(hh) + " h" : std::string());
+}
+
+// 0 = normal, 1 = yellow warning (above 50 %), 2 = red warning (above 80 %).
+inline int Level(double pct) { return pct > 80.0 ? 2 : (pct > 50.0 ? 1 : 0); }
+
+}  // namespace usage
+// ==USAGE-PARSE-END==
+
+// -- Claude usage: file reader thread ------------------------------------------------
+std::wstring ClaudeUsageFilePath(const std::wstring& configured) {
+    const std::wstring raw = configured.empty() ? std::wstring(L"%USERPROFILE%\\.claude\\island-usage.json")
+                                                : configured;
+    wchar_t buf[2 * MAX_PATH] = {};
+    const DWORD n = ExpandEnvironmentStringsW(raw.c_str(), buf, ARRAYSIZE(buf));
+    if (n == 0 || n > ARRAYSIZE(buf)) return raw;
+    return buf;
+}
+
+bool ReadSmallFile(const std::wstring& path, std::string& out) {
+    out.clear();
+    // The status line script may be writing right now; share generously.
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    char buf[8192];
+    DWORD got = 0;
+    while (out.size() < 65536 && ReadFile(h, buf, sizeof(buf), &got, nullptr) && got > 0) {
+        out.append(buf, got);
+    }
+    CloseHandle(h);
+    return true;
+}
+
+bool SameUsage(const ClaudeUsageSnapshot& a, const ClaudeUsageSnapshot& b) {
+    return a.hasData == b.hasData && a.fiveOk == b.fiveOk && a.sevenOk == b.sevenOk &&
+           a.fivePct == b.fivePct && a.sevenPct == b.sevenPct &&
+           a.fiveResetsAt == b.fiveResetsAt && a.sevenResetsAt == b.sevenResetsAt &&
+           a.updatedAt == b.updatedAt;
+}
+
+DWORD WINAPI UsageThreadProc(void*) {
+    WaitForSingleObject(g_stopEvent, 2000);
+
+    ClaudeUsageSnapshot published;
+    while (WaitForSingleObject(g_stopEvent, 0) == WAIT_TIMEOUT) {
+        bool enabled = false;
+        std::wstring configuredFile;
+        {
+            std::lock_guard lock(g_settingsMutex);
+            enabled = g_settings.claudeUsage;
+            configuredFile = g_settings.claudeUsageFile;
+        }
+
+        ClaudeUsageSnapshot next;
+        if (enabled) {
+            std::string text;
+            usage::Data d;
+            if (ReadSmallFile(ClaudeUsageFilePath(configuredFile), text) && usage::Parse(text, d)) {
+                next.hasData = true;
+                next.fiveOk = d.five.ok;
+                next.sevenOk = d.seven.ok;
+                next.fivePct = d.five.pct;
+                next.sevenPct = d.seven.pct;
+                next.fiveResetsAt = d.five.resetsAt;
+                next.sevenResetsAt = d.seven.resetsAt;
+                next.updatedAt = d.updatedAt;
+            }
+        }
+
+        if (!SameUsage(next, published)) {
+            {
+                std::lock_guard lock(g_stateMutex);
+                g_state.claudeUsage = next;
+            }
+            published = next;
+            g_layoutDirty = true;
+        }
+
+        WaitForSingleObject(g_stopEvent, 4000);
     }
     return 0;
 }
@@ -17354,6 +17545,137 @@ class Renderer {
         }
     }
 
+    // One limit: label, percentage, bar and reset line. Above 50 % the bar and the number turn
+    // yellow, above 80 % red (judged on the rounded number that is shown).
+    void DrawUsageBlock(float left, float right, float top, float scale, const wchar_t* label,
+                        bool ok, bool expired, double pct, const std::wstring& resetText) {
+        const float w = right - left;
+        textBrush_->SetOpacity(0.94f);
+        DrawEllipsisText(label, D2D1::RectF(left, top, right - 70.0f * scale, top + 15.0f * scale),
+                         smallTextFormat_.Get(), textBrush_.Get());
+
+        // Warning colour, decided on the number the user actually sees.
+        const bool live = ok && !expired;
+        const double shown = std::round(pct);
+        const int level = live ? usage::Level(shown) : 0;
+        D2D1_COLOR_F levelColor = material_.accent;
+        if (level == 1) levelColor = D2D1::ColorF(0xF4B400);
+        else if (level == 2) levelColor = D2D1::ColorF(0xE5484D);
+        levelColor.a = 0.95f * settingsOpacity_;
+
+        wchar_t pctBuf[24] = {};
+        if (live) swprintf_s(pctBuf, L"%.0f %%", shown);
+        else wcscpy_s(pctBuf, ARRAYSIZE(pctBuf), L"\u2014");
+        if (boldTextFormat_) {
+            boldTextFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING);
+            textBrush_->SetOpacity(0.96f);
+            ComPtr<ID2D1SolidColorBrush> warnBrush;
+            if (level > 0) target_->CreateSolidColorBrush(levelColor, &warnBrush);
+            target_->DrawTextW(pctBuf, static_cast<UINT32>(wcslen(pctBuf)), boldTextFormat_.Get(),
+                               D2D1::RectF(right - 70.0f * scale, top - 1.0f * scale, right, top + 15.0f * scale),
+                               warnBrush ? static_cast<ID2D1Brush*>(warnBrush.Get())
+                                         : static_cast<ID2D1Brush*>(textBrush_.Get()),
+                               D2D1_DRAW_TEXT_OPTIONS_NONE);
+            boldTextFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+        }
+
+        const float barH = 7.0f * scale;
+        const D2D1_RECT_F track = D2D1::RectF(left, top + 19.0f * scale, right, top + 19.0f * scale + barH);
+        if (raisedStrongBrush_) {
+            target_->FillRoundedRectangle(D2D1::RoundedRect(track, barH * 0.5f, barH * 0.5f),
+                                          raisedStrongBrush_.Get());
+        }
+        if (ok && !expired && pct > 0.0) {
+            const float span = std::max(barH, w * static_cast<float>(pct / 100.0));
+            ComPtr<ID2D1SolidColorBrush> fill;
+            target_->CreateSolidColorBrush(levelColor, &fill);
+            if (fill) {
+                target_->FillRoundedRectangle(
+                    D2D1::RoundedRect(D2D1::RectF(left, track.top, left + span, track.bottom),
+                                      barH * 0.5f, barH * 0.5f), fill.Get());
+            }
+        }
+
+        mutedBrush_->SetOpacity(0.80f);
+        DrawEllipsisText(resetText, D2D1::RectF(left, top + 29.0f * scale, right, top + 44.0f * scale),
+                         smallTextFormat_.Get(), mutedBrush_.Get());
+    }
+
+    // Claude usage tab: 5-hour session and weekly limit of the plan, as a percentage of
+    // the limit (Anthropic does not expose token counts). Fed by the status line script.
+    void DrawClaudeUsageDashboard(const SharedState& state, D2D1_RECT_F rect,
+                                  const Settings& settings, float scale) {
+        (void)settings;
+        if (!textBrush_ || !mutedBrush_ || !smallTextFormat_) return;
+        const float padX = FileTrayLayout::kPadX * scale;
+        const ClaudeUsageSnapshot& u = state.claudeUsage;
+        const int64_t nowUtc = LyricsCache::UnixNow();
+
+        const D2D1_RECT_F headerRect = D2D1::RectF(rect.left + padX, rect.top + 18.0f * scale,
+                                                   rect.right - padX, rect.top + 38.0f * scale);
+        if (boldTextFormat_) {
+            textBrush_->SetOpacity(0.96f);
+            boldTextFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+            const wchar_t* title = Loc(L"Claude usage");
+            target_->DrawTextW(title, static_cast<UINT32>(wcslen(title)), boldTextFormat_.Get(),
+                               headerRect, textBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_NONE);
+            boldTextFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+        }
+
+        if (!u.hasData) {
+            const std::wstring hint = std::wstring(Loc(L"No usage data yet")) + L"\n" +
+                                      Loc(L"Set up the status line script (see mod settings)");
+            mutedBrush_->SetOpacity(0.80f);
+            smallTextFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+            smallTextFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            target_->DrawTextW(hint.c_str(), static_cast<UINT32>(hint.size()), smallTextFormat_.Get(),
+                               D2D1::RectF(rect.left + padX, rect.top + 44.0f * scale, rect.right - padX,
+                                           rect.bottom - 16.0f * scale),
+                               mutedBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_NONE);
+            smallTextFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+            smallTextFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+            mutedBrush_->SetOpacity(0.75f);
+            return;
+        }
+
+        // How old the numbers are: they only refresh while Claude Code is being used.
+        if (u.updatedAt > 0) {
+            wchar_t ageBuf[96] = {};
+            const std::wstring dur = LyricsCache::Utf8ToWide(usage::Duration(nowUtc - u.updatedAt));
+            swprintf_s(ageBuf, Loc(L"Updated %s ago"), dur.c_str());
+            mutedBrush_->SetOpacity(0.70f);
+            smallTextFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING);
+            target_->DrawTextW(ageBuf, static_cast<UINT32>(wcslen(ageBuf)), smallTextFormat_.Get(),
+                               D2D1::RectF(rect.left + padX + 110.0f * scale, rect.top + 20.0f * scale,
+                                           rect.right - padX, rect.top + 38.0f * scale),
+                               mutedBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_NONE);
+            smallTextFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+        }
+
+        auto resetLine = [&](bool ok, int64_t resetsAt, bool& expired) {
+            expired = ok && resetsAt <= nowUtc;
+            if (!ok) return std::wstring();
+            if (expired) return std::wstring(Loc(L"Waiting for Claude Code"));
+            wchar_t buf[96] = {};
+            const std::wstring dur = LyricsCache::Utf8ToWide(usage::Duration(resetsAt - nowUtc));
+            swprintf_s(buf, Loc(L"Resets in %s"), dur.c_str());
+            return std::wstring(buf);
+        };
+
+        const float left = rect.left + padX;
+        const float right = rect.right - padX;
+        bool fiveExpired = false, sevenExpired = false;
+        const std::wstring fiveText = resetLine(u.fiveOk, u.fiveResetsAt, fiveExpired);
+        const std::wstring sevenText = resetLine(u.sevenOk, u.sevenResetsAt, sevenExpired);
+        DrawUsageBlock(left, right, rect.top + 50.0f * scale, scale, Loc(L"Session"),
+                       u.fiveOk, fiveExpired, u.fivePct, fiveText);
+        DrawUsageBlock(left, right, rect.top + 104.0f * scale, scale, Loc(L"Week"),
+                       u.sevenOk, sevenExpired, u.sevenPct, sevenText);
+
+        textBrush_->SetOpacity(0.96f);
+        mutedBrush_->SetOpacity(0.75f);
+    }
+
     // One line of text, vertically centred in `box`, trimmed with an ellipsis.
     void DrawEllipsisText(const std::wstring& text, D2D1_RECT_F box, IDWriteTextFormat* fmt,
                           ID2D1Brush* brush) {
@@ -17949,6 +18271,7 @@ class Renderer {
             activeTabs.push_back(3); // Time (shown first when the island expands/on hover)
             activeTabs.push_back(0); // Calendar
             if (AppointmentsTabEnabled(settings)) activeTabs.push_back(6); // Appointments
+            if (ClaudeUsageTabEnabled(settings)) activeTabs.push_back(7);  // Claude usage
             if (settings.weather) activeTabs.push_back(1);
             if (settings.hardwareMonitorModule) activeTabs.push_back(2);
             if (settings.fileTrayModule) activeTabs.push_back(4);
@@ -17970,6 +18293,7 @@ class Renderer {
                 if (activeTabId == 3) DrawTimeDashboard(state, fullRect, settings, now, scale, local);
                 else if (activeTabId == 0) DrawCalendarDashboard(state, fullRect, settings, now, scale, local);
                 else if (activeTabId == 6) DrawAppointmentsDashboard(state, fullRect, settings, scale);
+                else if (activeTabId == 7) DrawClaudeUsageDashboard(state, fullRect, settings, scale);
                 else if (activeTabId == 1) DrawWeatherDashboard(state, fullRect, settings, now, scale, hasWeather, wIcon, wText);
                 else if (activeTabId == 2) DrawHardwareMonitorDashboard(state, fullRect, settings, scale);
                 else if (activeTabId == 4) DrawFileTrayDashboard(state, fullRect, settings, scale);
@@ -18524,6 +18848,7 @@ class Renderer {
             activeTabs.push_back(0); // Media
             activeTabs.push_back(1); // Calendar
             if (AppointmentsTabEnabled(settings)) activeTabs.push_back(6); // Appointments
+            if (ClaudeUsageTabEnabled(settings)) activeTabs.push_back(7);  // Claude usage
             if (settings.weather) activeTabs.push_back(2);
             if (settings.hardwareMonitorModule) activeTabs.push_back(3);
             if (settings.fileTrayModule) activeTabs.push_back(4);
@@ -18766,6 +19091,8 @@ class Renderer {
                 DrawCalendarDashboard(state, rect, settings, now, 1.0f, local);
             } else if (activeTabId == 6) {
                 DrawAppointmentsDashboard(state, rect, settings, 1.0f);
+            } else if (activeTabId == 7) {
+                DrawClaudeUsageDashboard(state, rect, settings, 1.0f);
             } else if (activeTabId == 2) {
                 bool hasWeather = state.weather.hasData && (now - state.weather.lastUpdated < 3600.0);
                 std::wstring wIcon = L"🌡️"; std::wstring wText = Loc(L"Loading...");
@@ -26981,6 +27308,7 @@ bool StartThreads() {
     g_audioThread = CreateThread(nullptr, 0, AudioThreadProc, nullptr, 0, nullptr);
     g_weatherThread = CreateThread(nullptr, 0, WeatherThreadProc, nullptr, 0, nullptr);
     g_calendarThread = CreateThread(nullptr, 0, CalendarThreadProc, nullptr, 0, nullptr);
+    g_usageThread = CreateThread(nullptr, 0, UsageThreadProc, nullptr, 0, nullptr);
     g_lyricsThread = CreateThread(nullptr, 0, LyricsThreadProc, nullptr, 0, nullptr);
     g_keyboardThread = CreateThread(nullptr, 0, KeyboardThreadProc, nullptr, 0, &g_keyboardThreadId);
     g_mouseThread = CreateThread(nullptr, 0, MouseThreadProc, nullptr, 0, &g_mouseThreadId);
@@ -27005,7 +27333,7 @@ void StopThreads() {
         SetEvent(g_stopEvent);
     }
 
-    HANDLE handles[] = {g_renderThread, g_mediaThread, g_audioThread, g_weatherThread, g_calendarThread, g_lyricsThread, g_notificationThread, g_keyboardThread, g_mouseThread, g_bluetoothThread};
+    HANDLE handles[] = {g_renderThread, g_mediaThread, g_audioThread, g_weatherThread, g_calendarThread, g_usageThread, g_lyricsThread, g_notificationThread, g_keyboardThread, g_mouseThread, g_bluetoothThread};
     for (HANDLE handle : handles) {
         if (handle) {
             WaitForSingleObject(handle, 3000);
@@ -27018,6 +27346,7 @@ void StopThreads() {
     g_audioThread = nullptr;
     g_weatherThread = nullptr;
     g_calendarThread = nullptr;
+    g_usageThread = nullptr;
     g_lyricsThread = nullptr;
     g_notificationThread = nullptr;
     g_keyboardThread = nullptr;

@@ -248,6 +248,8 @@ struct Settings {
     std::wstring weatherCity;
     bool weatherFahrenheit = false;
     bool appointments = false;                        // Modules.Appointments
+    bool claudeUsage = false;                         // Modules.ClaudeUsage
+    std::wstring claudeUsageFile;                     // Modules.ClaudeUsageFile
     std::vector<std::wstring> appointmentCalendars;   // Modules.AppointmentCalendars[i]
     bool lyrics = false;
     bool lyricsVisualizer = true;
@@ -665,6 +667,18 @@ struct CalendarSnapshot {
     std::shared_ptr<const std::vector<CalEvent>> events;
 };
 
+// Plan limits as mirrored by the Claude Code status line script (see usage::).
+struct ClaudeUsageSnapshot {
+    bool hasData = false;
+    bool fiveOk = false;
+    bool sevenOk = false;
+    double fivePct = 0.0;
+    double sevenPct = 0.0;
+    int64_t fiveResetsAt = 0;
+    int64_t sevenResetsAt = 0;
+    int64_t updatedAt = 0;
+};
+
 enum class SongIdStatus {
     Listening,
     Matching,
@@ -707,6 +721,7 @@ struct SharedState {
     SystemSnapshot system;
     WeatherSnapshot weather;
     CalendarSnapshot calendar;
+    ClaudeUsageSnapshot claudeUsage;
     LyricsSnapshot lyrics;
     LookupSnapshot lookup;
     std::vector<LookupRecent> lookupRecent;  // newest first, guarded by g_stateMutex

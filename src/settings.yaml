@@ -262,6 +262,12 @@
   - MediaPillClock: false
     $name: Show clock in the collapsed media pill
     $description: While media is playing, the collapsed pill also shows the current time on the left, separated from the album cover by a thin divider. Hovering still opens the normal player. Uses the same 12h/24h and seconds options as the clock below. Off by default.
+  - ClaudeUsage: false
+    $name: Claude usage tab (session and weekly limit)
+    $description: "Adds a tab with how much of your Claude plan's 5-hour session limit and weekly limit is used, and when each resets. Anthropic shows these as percentages, not token counts. The numbers come from a small file that Claude Code's status line script writes (claude-usage-statusline.ps1, see the mod readme), so they only update while Claude Code is in use."
+  - ClaudeUsageFile: ""
+    $name: Claude usage file (optional)
+    $description: "Path of the JSON file written by the status line script. Leave empty for %USERPROFILE%\\.claude\\island-usage.json."
   - Volume: true
     $name: Volume slider flyout
     $description: Shows a volume slider banner on the island when adjusting system volume. Disable if you prefer the default Windows volume flyout.

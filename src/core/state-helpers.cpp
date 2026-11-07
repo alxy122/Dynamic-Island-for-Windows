@@ -151,9 +151,14 @@ bool AppointmentsTabEnabled(const Settings& settings) {
     return settings.appointments && !settings.appointmentCalendars.empty();
 }
 
+bool ClaudeUsageTabEnabled(const Settings& settings) {
+    return settings.claudeUsage;
+}
+
 int ActiveTabCount(const Settings& settings) {
     int count = 2;  // primary (media or clock) + calendar
     if (AppointmentsTabEnabled(settings)) ++count;
+    if (ClaudeUsageTabEnabled(settings)) ++count;
     if (settings.weather) ++count;
     if (settings.hardwareMonitorModule) ++count;
     if (settings.fileTrayModule) ++count;
@@ -167,7 +172,7 @@ int NormalizedTabIndex(const Settings& settings) {
     return ((raw % total) + total) % total;
 }
 
-// Tab order is always: primary, calendar, appointments?, weather?, hardware?, file tray?
+// Tab order is always: primary, calendar, appointments?, Claude usage?, weather?, hardware?, file tray?
 // The expensive GPU / network counters are only sampled while the hardware card
 // is actually on screen, so that check needs the card's real index rather than
 // assuming it is the last tab -- which stopped being true once the File Tray
@@ -184,7 +189,7 @@ int HardwareMonitorTabIndex(const Settings& settings) {
     if (!settings.hardwareMonitorModule) {
         return -1;
     }
-    return 2 + (AppointmentsTabEnabled(settings) ? 1 : 0) +
+    return 2 + (AppointmentsTabEnabled(settings) ? 1 : 0) + (ClaudeUsageTabEnabled(settings) ? 1 : 0) +
            (settings.weather ? 1 : 0) + MediaTabIndex(settings);
 }
 
@@ -192,7 +197,7 @@ int FileTrayTabIndex(const Settings& settings) {
     if (!settings.fileTrayModule) {
         return -1;
     }
-    return 2 + (AppointmentsTabEnabled(settings) ? 1 : 0) +
+    return 2 + (AppointmentsTabEnabled(settings) ? 1 : 0) + (ClaudeUsageTabEnabled(settings) ? 1 : 0) +
            (settings.weather ? 1 : 0) + (settings.hardwareMonitorModule ? 1 : 0) + MediaTabIndex(settings);
 }
 

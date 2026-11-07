@@ -395,6 +395,8 @@ void LoadSettings() {
     next.weatherCity = GetStringSettingWithFallback(L"Modules.WeatherCity", L"Weather.WeatherCity", L"CalendarWeather.WeatherCity");
     next.weatherFahrenheit = Wh_GetIntSetting(L"Modules.WeatherFahrenheit") != 0;
     next.appointments = Wh_GetIntSetting(L"Modules.Appointments") != 0;
+    next.claudeUsage = Wh_GetIntSetting(L"Modules.ClaudeUsage") != 0;
+    next.claudeUsageFile = GetStringSettingCopy(L"Modules.ClaudeUsageFile");
     next.appointmentCalendars.clear();
     for (int i = 0; i < 8; ++i) {
         wchar_t key[64];

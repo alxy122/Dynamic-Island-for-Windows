@@ -131,6 +131,7 @@
             activeTabs.push_back(0); // Media
             activeTabs.push_back(1); // Calendar
             if (AppointmentsTabEnabled(settings)) activeTabs.push_back(6); // Appointments
+            if (ClaudeUsageTabEnabled(settings)) activeTabs.push_back(7);  // Claude usage
             if (settings.weather) activeTabs.push_back(2);
             if (settings.hardwareMonitorModule) activeTabs.push_back(3);
             if (settings.fileTrayModule) activeTabs.push_back(4);
@@ -373,6 +374,8 @@
                 DrawCalendarDashboard(state, rect, settings, now, 1.0f, local);
             } else if (activeTabId == 6) {
                 DrawAppointmentsDashboard(state, rect, settings, 1.0f);
+            } else if (activeTabId == 7) {
+                DrawClaudeUsageDashboard(state, rect, settings, 1.0f);
             } else if (activeTabId == 2) {
                 bool hasWeather = state.weather.hasData && (now - state.weather.lastUpdated < 3600.0);
                 std::wstring wIcon = L"🌡️"; std::wstring wText = Loc(L"Loading...");

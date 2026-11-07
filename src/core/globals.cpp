@@ -33,6 +33,7 @@ HANDLE g_mediaThread = nullptr;
 HANDLE g_audioThread = nullptr;
 HANDLE g_weatherThread = nullptr;
 HANDLE g_calendarThread = nullptr;
+HANDLE g_usageThread = nullptr;
 HANDLE g_calendarRefreshEvent = nullptr;  // wakes CalendarThreadProc
 HANDLE g_lyricsThread = nullptr;
 HANDLE g_notificationThread = nullptr;
