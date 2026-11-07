@@ -4,6 +4,53 @@ double NowSeconds() {
     return std::chrono::duration<double>(clock::now() - start).count();
 }
 
+// Is there a media session the island should be showing right now?
+//
+// A paused player keeps its session, so media.available stays true for hours and
+// the island used to sit on the paused track (and a frozen lyric line) for as
+// long. With Modules.MediaPausedShowsClock a session only counts while it plays,
+// plus a short grace so the brief non-playing blip between two tracks does not
+// make the island flap to the clock and back. Every place that asks "is the media
+// view up?" goes through here, so clicks, tabs and lyrics all agree with what is
+// actually drawn (a click on the idle clock must never hit the player's controls).
+//
+// A paused session is only hidden from the collapsed island: while the island is
+// open (hover, click or pinned) the player is still there, so playback can be
+// resumed. Its X button (MediaDismissHitTest) dismisses the paused session for
+// good, until it plays again.
+constexpr double kMediaPauseGraceSeconds = 2.5;
+std::atomic<double> g_mediaLastPlayingAt{-1e9};
+std::atomic<bool> g_islandOpen{false};           // last frame: hover-expanded or pinned (render loop)
+std::atomic<uint64_t> g_mediaDismissedKey{0};    // MediaSessionKey of the dismissed paused session, 0 = none
+
+// Identifies "this paused track in this app", so a dismissal does not stick to
+// the next song or to another player.
+uint64_t MediaSessionKey(const MediaSnapshot& media) {
+    const std::wstring id = media.sourceAppUserModelId + L'\n' + media.title + L'\n' + media.artist;
+    return static_cast<uint64_t>(std::hash<std::wstring>{}(id)) | 1ull;  // never 0
+}
+
+bool MediaVisible(const SharedState& state, const Settings& settings) {
+    if (!settings.media || !state.media.available) {
+        return false;
+    }
+    const double now = NowSeconds();
+    if (state.media.playing) {
+        g_mediaLastPlayingAt.store(now, std::memory_order_relaxed);
+        g_mediaDismissedKey.store(0, std::memory_order_relaxed);  // playing again: back for good
+        return true;
+    }
+    const uint64_t dismissed = g_mediaDismissedKey.load(std::memory_order_relaxed);
+    if (dismissed != 0 && dismissed == MediaSessionKey(state.media)) {
+        return false;
+    }
+    if (!settings.mediaPausedShowsClock) {
+        return true;
+    }
+    return now - g_mediaLastPlayingAt.load(std::memory_order_relaxed) < kMediaPauseGraceSeconds ||
+           g_islandOpen.load(std::memory_order_relaxed);
+}
+
 float Clamp(float v, float lo, float hi) {
     return std::max(lo, std::min(hi, v));
 }
@@ -145,8 +192,20 @@ std::wstring FormatWithName(const wchar_t* format, const std::wstring& name) {
 // renderer, the scroll handler and the hit tests can all share this. That
 // arithmetic used to be copy-pasted in seven places, which is exactly how they
 // drifted out of sync.
+// The appointments list tab sits right after the calendar. It exists once the
+// feature is on and at least one calendar feed is configured.
+bool AppointmentsTabEnabled(const Settings& settings) {
+    return settings.appointments && !settings.appointmentCalendars.empty();
+}
+
+bool ClaudeUsageTabEnabled(const Settings& settings) {
+    return settings.claudeUsage;
+}
+
 int ActiveTabCount(const Settings& settings) {
     int count = 2;  // primary (media or clock) + calendar
+    if (AppointmentsTabEnabled(settings)) ++count;
+    if (ClaudeUsageTabEnabled(settings)) ++count;
     if (settings.weather) ++count;
     if (settings.hardwareMonitorModule) ++count;
     if (settings.fileTrayModule) ++count;
@@ -160,7 +219,7 @@ int NormalizedTabIndex(const Settings& settings) {
     return ((raw % total) + total) % total;
 }
 
-// Tab order is always: primary, calendar, weather?, hardware?, file tray?
+// Tab order is always: primary, calendar, appointments?, Claude usage?, weather?, hardware?, file tray?
 // The expensive GPU / network counters are only sampled while the hardware card
 // is actually on screen, so that check needs the card's real index rather than
 // assuming it is the last tab -- which stopped being true once the File Tray
@@ -177,15 +236,29 @@ int HardwareMonitorTabIndex(const Settings& settings) {
     if (!settings.hardwareMonitorModule) {
         return -1;
     }
-    return 2 + (settings.weather ? 1 : 0) + MediaTabIndex(settings);
+    return 2 + (AppointmentsTabEnabled(settings) ? 1 : 0) + (ClaudeUsageTabEnabled(settings) ? 1 : 0) +
+           (settings.weather ? 1 : 0) + MediaTabIndex(settings);
 }
 
 int FileTrayTabIndex(const Settings& settings) {
     if (!settings.fileTrayModule) {
         return -1;
     }
-    return 2 + (settings.weather ? 1 : 0) + (settings.hardwareMonitorModule ? 1 : 0) +
-           MediaTabIndex(settings);
+    return 2 + (AppointmentsTabEnabled(settings) ? 1 : 0) + (ClaudeUsageTabEnabled(settings) ? 1 : 0) +
+           (settings.weather ? 1 : 0) + (settings.hardwareMonitorModule ? 1 : 0) + MediaTabIndex(settings);
+}
+
+int AppointmentsTabIndex(const Settings& settings) {
+    return AppointmentsTabEnabled(settings) ? 2 + MediaTabIndex(settings) : -1;
+}
+
+// Is the point (content space) on the Appointments tab's "+N more" line?
+bool ApptMoreHitTest(const MediaContentPoint& cp) {
+    if (!cp.valid || !g_apptMoreValid.load(std::memory_order_relaxed)) return false;
+    return cp.x >= g_apptMoreL.load(std::memory_order_relaxed) &&
+           cp.x <= g_apptMoreR.load(std::memory_order_relaxed) &&
+           cp.y >= g_apptMoreT.load(std::memory_order_relaxed) &&
+           cp.y <= g_apptMoreB.load(std::memory_order_relaxed);
 }
 
 // Moves the dashboard one tab (+1 = next, -1 = previous). Clamped at both ends:

@@ -63,6 +63,13 @@ namespace MediaLayout {
     // this height is still the collapsed pill and must not be hit-tested.
     constexpr float kExpandedMinHeight = 60.0f;
 
+    // X button of a paused player (top right, above the sound waves): dismisses
+    // the paused session until it plays again. Draw code and hit test share these.
+    constexpr float kDismissInsetRight = 40.0f;  // button centre from the right edge
+    constexpr float kDismissY = 22.0f;           // button centre from the top edge
+    constexpr float kDismissRadius = 10.0f;
+    constexpr float kDismissHitPad = 5.0f;
+
     // ── Source dock ──────────────────────────────────────────────────────────
     // Widest layout is 3 slots = 86px, so it ends at x=106, clear of the prev
     // button (~110). Draw code and hit test both read these.
@@ -127,6 +134,7 @@ namespace ImmersiveLayout {
 }
 std::atomic<bool> g_immersiveLyrics{false};   // lyrics view requested
 std::atomic<bool> g_hoveredLyricsBtn{false};
+std::atomic<bool> g_hoveredMediaDismiss{false};  // cursor on the paused player's X button
 std::atomic<float> g_immersiveMixPub{0.0f};   // eased 0..1 mix, published by DrawMedia for hit tests
 
 // Layout for the File Tray card (#33). Shared by DrawFileTrayDashboard and the
@@ -219,6 +227,16 @@ namespace IdleStripLayout {
 // is 0 wide and the pill is exactly the old 150px.
 namespace MediaPillLayout {
     constexpr float kBaseWidth = 150.0f;    // same as ActivityForKind's Media width
+    // With the info slots (MediaPillInfo) there is no title in the pill, so the
+    // part right of the slots is only as wide as what it holds: cover (6+32),
+    // a 10px gap and the 28px sound waves with their 14px right margin ...
+    constexpr float kInfoArtWidth = 90.0f;
+    // ... or, when the player has no cover (typical for a browser), the waves alone.
+    constexpr float kInfoWavesWidth = 52.0f;
+    // Media as the second, small pill next to a notification: sound waves only.
+    constexpr float kWavesOnlyWidth = 56.0f;
+    // The waves move left by this much while a privacy dot is shown.
+    constexpr float kPrivacyShift = 22.0f;
     constexpr float kClockPadLeft = 14.0f;  // left edge -> clock text
     constexpr float kSlotGap = 9.0f;        // clock text -> divider
     constexpr float kDividerWidth = 1.0f;

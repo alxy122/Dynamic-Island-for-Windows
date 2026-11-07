@@ -324,6 +324,19 @@ bool MediaLyricsButtonHitTest(const MediaContentPoint& rawPt) {
            std::fabs(pt.y - MediaLayout::kControlsY) <= reach;
 }
 
+// True when the point is over the X button of a paused player. Not offered in
+// the immersive lyrics view, whose header uses that corner. Callers check that
+// the player is paused.
+bool MediaDismissHitTest(const MediaContentPoint& pt) {
+    if (!pt.valid || pt.height <= MediaLayout::kExpandedMinHeight ||
+        g_immersiveMixPub.load(std::memory_order_relaxed) > 0.01f) {
+        return false;
+    }
+    const float cx = pt.width - MediaLayout::kDismissInsetRight;
+    const float reach = MediaLayout::kDismissRadius + MediaLayout::kDismissHitPad;
+    return std::fabs(pt.x - cx) <= reach && std::fabs(pt.y - MediaLayout::kDismissY) <= reach;
+}
+
 // ── Source dock: slot layout + hit testing ──────────────────────────────────
 struct DockSlots {
     int count = 0;                      // slots drawn

@@ -23,10 +23,17 @@
                                                   rect.right - 11, rect.bottom - 11);
                 DrawBitmapPixels(*media.sourceIcon, iconRect, mediaSourceIconBitmap_,
                                  mediaSourceIconGeneration_, 0.95f);
-            } else {
+            } else if (textFormat_) {
+                // Centred in the placeholder (it used to sit in the top left corner).
+                const DWRITE_TEXT_ALIGNMENT oldAlign = textFormat_->GetTextAlignment();
+                const DWRITE_PARAGRAPH_ALIGNMENT oldPara = textFormat_->GetParagraphAlignment();
+                textFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+                textFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
                 target_->DrawTextW(media.sourceBadge.empty() ? L"\u25b6" : media.sourceBadge.c_str(),
                                    static_cast<UINT32>(media.sourceBadge.empty() ? 1 : media.sourceBadge.size()),
                                    textFormat_.Get(), rect, textBrush_.Get());
+                textFormat_->SetTextAlignment(oldAlign);
+                textFormat_->SetParagraphAlignment(oldPara);
             }
         }
 

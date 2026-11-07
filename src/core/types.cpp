@@ -247,6 +247,10 @@ struct Settings {
     bool weather = true;
     std::wstring weatherCity;
     bool weatherFahrenheit = false;
+    bool appointments = false;                        // Modules.Appointments
+    bool claudeUsage = false;                         // Modules.ClaudeUsage
+    std::wstring claudeUsageFile;                     // Modules.ClaudeUsageFile
+    std::vector<std::wstring> appointmentCalendars;   // Modules.AppointmentCalendars[i]
     bool lyrics = false;
     bool lyricsVisualizer = true;
     bool karaokeLyrics = true;
@@ -255,6 +259,7 @@ struct Settings {
     int lyricsOffsetMs = 0;      // Modules.LyricsOffsetMs, speakers / wired, ms
     int lyricsOffsetBtMs = 0;    // Modules.LyricsOffsetBluetoothMs, Bluetooth output, ms
     bool collapsedLyrics = false;  // lyrics inside the collapsed media pill (right-click toggle)
+    bool mediaPillInfo = true;     // Modules.MediaPillInfo: clock + weather in the pill when no lyric line is shown
     bool lyricsPinnedFirst = false;  // Lyrics tab is the first tab of the expanded media view (right-click toggle)
     bool lyricsCache = true;       // Modules.LyricsCache
     int lyricsCacheMaxMB = 25;     // Modules.LyricsCacheMaxMB; 0 = disk cache off
@@ -302,6 +307,7 @@ struct Settings {
     bool clockFollowSystem = true;
     std::wstring dateFormat;        // empty = locale default
     bool mediaPillClock = false;    // show the clock inside the collapsed media pill
+    bool mediaPausedShowsClock = true;  // paused player -> idle view (Modules.MediaPausedShowsClock)
     bool dateFirst = false;
     int firstDayOfWeek = -1;        // 0 = Sunday .. 6 = Saturday, -1 = follow Windows
 
@@ -647,6 +653,34 @@ struct LookupUiState {
 };
 LookupUiState g_lookupUi;
 
+// One appointment from a calendar feed (UTC epoch seconds).
+struct CalEvent {
+    int64_t startUtc = 0;
+    int64_t endUtc = 0;
+    bool allDay = false;
+    std::wstring title;
+    uint32_t color = 0x4285F4;  // 0xRRGGBB
+};
+
+// Published by CalendarThreadProc; the vector is immutable once shared, so the
+// per-frame SharedState copy only bumps a reference count.
+struct CalendarSnapshot {
+    bool hasData = false;
+    std::shared_ptr<const std::vector<CalEvent>> events;
+};
+
+// Plan limits as mirrored by the Claude Code status line script (see usage::).
+struct ClaudeUsageSnapshot {
+    bool hasData = false;
+    bool fiveOk = false;
+    bool sevenOk = false;
+    double fivePct = 0.0;
+    double sevenPct = 0.0;
+    int64_t fiveResetsAt = 0;
+    int64_t sevenResetsAt = 0;
+    int64_t updatedAt = 0;
+};
+
 enum class SongIdStatus {
     Listening,
     Matching,
@@ -688,6 +722,8 @@ struct SharedState {
     ProgressSnapshot progress;
     SystemSnapshot system;
     WeatherSnapshot weather;
+    CalendarSnapshot calendar;
+    ClaudeUsageSnapshot claudeUsage;
     LyricsSnapshot lyrics;
     LookupSnapshot lookup;
     std::vector<LookupRecent> lookupRecent;  // newest first, guarded by g_stateMutex

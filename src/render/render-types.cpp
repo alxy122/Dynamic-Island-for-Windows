@@ -78,7 +78,10 @@ struct MarqueeLayoutCache {
 struct IdleStripMetrics {
     float clockWidth = 0.0f;
     float weatherWidth = 0.0f;
+    float apptWidth = 0.0f;
+    std::wstring apptLabel;  // calendar icon + countdown bucket
     bool hasWeather = false;
+    bool hasAppt = false;
     bool hasPrivacy = false;
     float totalWidth = IdleStripLayout::kMinWidth;
 };
@@ -115,9 +118,17 @@ struct SwapTextState {
     MarqueeLayoutCache prevCache;     // layout cache for the outgoing text
 };
 
+// One reading in the info section of the collapsed media pill (clock, weather).
+struct MediaPillSlot {
+    std::wstring text;
+    float width = 0.0f;      // measured in the widest-digit form
+    bool colorFont = false;  // contains an emoji
+};
+
 struct MediaPillMetrics {
-    float clockWidth = 0.0f;
-    float sectionWidth = 0.0f;                       // clock + divider block on the left
+    std::vector<MediaPillSlot> slots;                // left to right, each followed by a divider
+    float sectionWidth = 0.0f;                       // slots + dividers block on the left
+    bool showArt = true;                             // false: no cover on the collapsed pill
     float totalWidth = MediaPillLayout::kBaseWidth;  // content space, before sizeScale
 };
 
@@ -142,12 +153,72 @@ std::wstring WidestDigitForm(std::wstring text) {
 // Width of the collapsed media pill while it carries a lyric line (content px).
 constexpr float kCollapsedLyricsWidth = 320.0f;
 
-// True when the collapsed pill should be widened for lyrics. "fetching" counts
-// too, so the pill does not shrink and regrow on every track change.
+// Synced lyrics that belong to the track playing right now (same test as
+// DrawCollapsedLyrics uses before it shows a lyric line).
+bool CollapsedLyricsUsable(const SharedState& state) {
+    return state.lyrics.hasData && state.lyrics.synced && !state.lyrics.lines.empty() &&
+           state.lyrics.matchedTitle == state.media.title &&
+           state.lyrics.matchedArtist == state.media.artist;
+}
+
+// Bookkeeping for CollapsedLyricsActive. Render thread only (the render loop and
+// the renderer both run there).
+struct CollapsedLyricsBridge {
+    bool lastHad = false;     // did the last decided track have synced lyrics?
+    std::wstring lastSource;  // ... and which app played it
+    std::wstring pendingKey;  // source + title + artist of the track being looked up
+    double pendingSince = 0.0;
+};
+CollapsedLyricsBridge g_collapsedLyricsBridge;
+
+// How long an undecided look-up may keep the previous track's width.
+constexpr double kCollapsedLyricsBridgeSec = 6.0;
+
+// True when the collapsed pill should be widened for lyrics.
+//
+// Only while there really are synced lyrics for the current track. A browser
+// stream, a video or a podcast has none, and used to get a 320px pill that just
+// repeated the page title while the clock, weather and the rest were hidden.
+//
+// Evaluated every frame. While the lyrics thread is still looking up a new
+// track, the pill keeps the previous track's width so an album does not shrink
+// and regrow at every song change. That bridge only holds while the same app
+// keeps playing and for at most kCollapsedLyricsBridgeSec: after a switch to
+// another source (dock, menu, or Auto picking another player after a pause) the
+// old track's lyrics say nothing about the new one, so the pill goes narrow at
+// once and only widens again when lyrics for the current track arrive.
 bool CollapsedLyricsActive(const SharedState& state, const Settings& settings) {
-    // Stays wide for as long as media is available. If there are no lyrics to
-    // show, DrawCollapsedLyrics shows the media title instead.
-    return settings.collapsedLyrics && settings.media && state.media.available;
+    if (!settings.collapsedLyrics || !MediaVisible(state, settings)) {
+        return false;
+    }
+    CollapsedLyricsBridge& bridge = g_collapsedLyricsBridge;
+    const std::wstring& source = state.media.sourceAppUserModelId;
+    if (CollapsedLyricsUsable(state)) {
+        bridge.lastHad = true;
+        bridge.lastSource = source;
+        bridge.pendingKey.clear();
+        return true;
+    }
+    const bool forThisTrack = state.lyrics.matchedTitle == state.media.title &&
+                              state.lyrics.matchedArtist == state.media.artist;
+    if (forThisTrack && !state.lyrics.fetching) {
+        // Decided: not found, unsynced, or the request gave up.
+        bridge.lastHad = false;
+        bridge.lastSource = source;
+        bridge.pendingKey.clear();
+        return false;
+    }
+    // Still looking (or the lyrics thread has not seen the new track yet).
+    if (!bridge.lastHad || source != bridge.lastSource) {
+        return false;
+    }
+    const std::wstring key = source + L'\n' + state.media.title + L'\n' + state.media.artist;
+    const double now = NowSeconds();
+    if (key != bridge.pendingKey) {
+        bridge.pendingKey = key;
+        bridge.pendingSince = now;
+    }
+    return now - bridge.pendingSince < kCollapsedLyricsBridgeSec;
 }
 
 // One pre-built lyric line. Built once when the line changes, then reused every

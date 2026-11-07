@@ -32,6 +32,9 @@ HANDLE g_renderThread = nullptr;
 HANDLE g_mediaThread = nullptr;
 HANDLE g_audioThread = nullptr;
 HANDLE g_weatherThread = nullptr;
+HANDLE g_calendarThread = nullptr;
+HANDLE g_usageThread = nullptr;
+HANDLE g_calendarRefreshEvent = nullptr;  // wakes CalendarThreadProc
 HANDLE g_lyricsThread = nullptr;
 HANDLE g_notificationThread = nullptr;
 HANDLE g_bluetoothThread = nullptr;
@@ -61,6 +64,7 @@ std::mutex g_mediaSourceMutex;                     // leaf lock for the two stri
 std::wstring g_preferredMediaSource;               // AUMID the user picked; empty = Auto
 std::wstring g_switchTarget;                       // pending animated switch
 std::wstring g_dockOverrideAumid;                  // temporary pick from the dock; guarded by g_mediaSourceMutex
+std::wstring g_islandPausedAumid;                  // source paused with the island's own button; guarded by g_mediaSourceMutex
 std::atomic<unsigned> g_dockOverrideRev{0};        // bumped on every dock pick / Auto reset
 std::atomic<int> g_switchDir{1};
 std::atomic<unsigned> g_switchSeq{0};
@@ -69,6 +73,14 @@ HANDLE g_mediaRefreshEvent = nullptr;              // wakes MediaThreadProc
 std::atomic<int> g_hoveredSourceSlot{-1};
 std::atomic<int> g_pressedSourceSlot{-1};
 std::atomic<int> g_hoveredFileTrayRow = -1;  // row index under the cursor on the File Tray card
+
+// Appointments tab paging. The wheel switches tabs, so a long list is paged by
+// clicking the "+N more" line at its foot.
+std::atomic<int> g_apptPageStart{0};       // first row of the list shown right now
+std::atomic<int> g_apptNextPageStart{0};   // where a click on the foot line goes (0 = back to the top)
+std::atomic<bool> g_apptMoreValid{false};  // the foot line was drawn this frame
+std::atomic<bool> g_hoveredApptMore{false};
+std::atomic<float> g_apptMoreL{0.0f}, g_apptMoreT{0.0f}, g_apptMoreR{0.0f}, g_apptMoreB{0.0f};
 std::atomic<int> g_hoveredFileTrayAction = -1;  // -2 = bin, -3 = paste, -4 = previous page, -5 = next page, >=0 = cut button of that row
 std::atomic<int> g_fileTrayScroll{0};           // index of the first visible row (newest-first order)
 std::atomic<bool> g_fileTrayPagerOn{true};      // Modules.FileTrayNavigation: pager shown

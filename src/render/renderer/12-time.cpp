@@ -1,8 +1,13 @@
     void DrawTimeDashboard(const SharedState& state, D2D1_RECT_F rect, const Settings& settings, double now, float scale, SYSTEMTIME& local) {
         (void)now;
 
+        AppointmentInfo nextAppt;
+        const bool hasNextAppt = GetNextAppointment(state, settings, nextAppt);
+
         const float cx = (rect.left + rect.right) * 0.5f;
-        const float cy = (rect.top + rect.bottom) * 0.5f;
+        // With an appointment line underneath, lift the clock/date block a little
+        // so the whole group stays centred and clear of the privacy badge.
+        const float cy = (rect.top + rect.bottom) * 0.5f - (hasNextAppt ? 12.0f * scale : 0.0f);
 
         if (settings.clockAccentGlow) {
             D2D1_COLOR_F accentColor = accentBrush_ ? accentBrush_->GetColor() : D2D1::ColorF(0x4cc9f0);
@@ -64,6 +69,10 @@
                                subRect, mutedBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_NONE);
         }
         textBrush_->SetOpacity(0.98f);
+
+        if (hasNextAppt) {
+            DrawNextAppointmentLine(nextAppt, settings, rect, scale, cy + 47.0f * scale);
+        }
 
         const bool micActive = state.system.micActive && settings.privacyDots && settings.privacyDotsMic;
         const bool camActive = state.system.cameraActive && settings.privacyDots && settings.privacyDotsCam;

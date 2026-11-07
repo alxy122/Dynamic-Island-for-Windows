@@ -2,6 +2,7 @@ bool StartThreads() {
     g_stopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     g_settingsChangedEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     g_mediaRefreshEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    g_calendarRefreshEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     if (!g_stopEvent || !g_settingsChangedEvent) {
         return false;
     }
@@ -15,6 +16,8 @@ bool StartThreads() {
     g_mediaThread = CreateThread(nullptr, 0, MediaThreadProc, nullptr, 0, nullptr);
     g_audioThread = CreateThread(nullptr, 0, AudioThreadProc, nullptr, 0, nullptr);
     g_weatherThread = CreateThread(nullptr, 0, WeatherThreadProc, nullptr, 0, nullptr);
+    g_calendarThread = CreateThread(nullptr, 0, CalendarThreadProc, nullptr, 0, nullptr);
+    g_usageThread = CreateThread(nullptr, 0, UsageThreadProc, nullptr, 0, nullptr);
     g_lyricsThread = CreateThread(nullptr, 0, LyricsThreadProc, nullptr, 0, nullptr);
     g_keyboardThread = CreateThread(nullptr, 0, KeyboardThreadProc, nullptr, 0, &g_keyboardThreadId);
     g_mouseThread = CreateThread(nullptr, 0, MouseThreadProc, nullptr, 0, &g_mouseThreadId);
@@ -39,7 +42,7 @@ void StopThreads() {
         SetEvent(g_stopEvent);
     }
 
-    HANDLE handles[] = {g_renderThread, g_mediaThread, g_audioThread, g_weatherThread, g_lyricsThread, g_notificationThread, g_keyboardThread, g_mouseThread, g_bluetoothThread};
+    HANDLE handles[] = {g_renderThread, g_mediaThread, g_audioThread, g_weatherThread, g_calendarThread, g_usageThread, g_lyricsThread, g_notificationThread, g_keyboardThread, g_mouseThread, g_bluetoothThread};
     for (HANDLE handle : handles) {
         if (handle) {
             WaitForSingleObject(handle, 3000);
@@ -51,6 +54,8 @@ void StopThreads() {
     g_mediaThread = nullptr;
     g_audioThread = nullptr;
     g_weatherThread = nullptr;
+    g_calendarThread = nullptr;
+    g_usageThread = nullptr;
     g_lyricsThread = nullptr;
     g_notificationThread = nullptr;
     g_keyboardThread = nullptr;
@@ -70,6 +75,10 @@ void StopThreads() {
     if (g_mediaRefreshEvent) {
         CloseHandle(g_mediaRefreshEvent);
         g_mediaRefreshEvent = nullptr;
+    }
+    if (g_calendarRefreshEvent) {
+        CloseHandle(g_calendarRefreshEvent);
+        g_calendarRefreshEvent = nullptr;
     }
 
     g_running = false;

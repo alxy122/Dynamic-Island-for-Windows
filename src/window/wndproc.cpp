@@ -266,7 +266,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 bool mediaActive = false;
                 {
                     std::lock_guard lock(g_stateMutex);
-                    mediaActive = g_settings.media && g_state.media.available;
+                    mediaActive = MediaVisible(g_state, g_settings);
                 }
 
                 const int currentTab = NormalizedTabIndex(g_settings);
@@ -276,11 +276,19 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                                                MediaTransportHitTest(cp) != -1 ||
                                                MediaScrubFractionFromContent(cp) >= 0.0f ||
                                                g_hoveredSourceSlot.load(std::memory_order_relaxed) >= 0 ||
-                                               (g_settings.mediaTabLyrics && MediaLyricsButtonHitTest(cp));
+                                               (g_settings.mediaTabLyrics && MediaLyricsButtonHitTest(cp)) ||
+                                               g_hoveredMediaDismiss.load(std::memory_order_relaxed);
                     if (hoverClickable) {
                         SetCursor(LoadCursorW(nullptr, IDC_HAND));
                         return TRUE;
                     }
+                }
+
+                // The Appointments "+N more" line is clickable.
+                if (AppointmentsTabEnabled(g_settings) && currentTab == AppointmentsTabIndex(g_settings) &&
+                    g_hoveredApptMore.load(std::memory_order_relaxed)) {
+                    SetCursor(LoadCursorW(nullptr, IDC_HAND));
+                    return TRUE;
                 }
 
                 // A File Tray row under the cursor is clickable (opens the file).
@@ -329,7 +337,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 bool mediaActive = false;
                 {
                     std::lock_guard lock(g_stateMutex);
-                    mediaActive = g_settings.media && g_state.media.available;
+                    mediaActive = MediaVisible(g_state, g_settings);
                 }
 
                 const int currentTab = NormalizedTabIndex(g_settings);
@@ -408,11 +416,21 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
             int hovered = -1;
             bool mediaActive = false;
+            bool mediaPaused = false;
             {
                 std::lock_guard lock(g_stateMutex);
-                mediaActive = g_settings.media && g_state.media.available;
+                mediaActive = MediaVisible(g_state, g_settings);
+                mediaPaused = !g_state.media.playing;
             }
             const int currentTab = NormalizedTabIndex(g_settings);
+
+            {
+                const bool onDismiss = mediaActive && mediaPaused && currentTab == MediaTabIndex(g_settings) &&
+                                       MediaDismissHitTest(MediaContentFromClient(xPos, yPos));
+                if (g_hoveredMediaDismiss.exchange(onDismiss) != onDismiss) {
+                    g_layoutDirty = true;
+                }
+            }
 
             int hoveredSlot = -1;
             if (mediaActive && currentTab == MediaTabIndex(g_settings)) {
@@ -460,6 +478,13 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     hoveredAction = hoveredRow;
                 }
             }
+            bool apptHover = false;
+            if (AppointmentsTabEnabled(g_settings) && currentTab == AppointmentsTabIndex(g_settings)) {
+                apptHover = ApptMoreHitTest(MediaContentFromClient(xPos, yPos));
+            }
+            if (g_hoveredApptMore.exchange(apptHover) != apptHover) {
+                g_layoutDirty = true;
+            }
             bool trayHoverChanged = false;
             if (g_hoveredFileTrayRow.exchange(hoveredRow) != hoveredRow) {
                 trayHoverChanged = true;
@@ -496,7 +521,13 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             if (g_hoveredLyricsBtn.exchange(false)) {
                 g_layoutDirty = true;
             }
+            if (g_hoveredMediaDismiss.exchange(false)) {
+                g_layoutDirty = true;
+            }
             s_trayPressActive = false;
+            if (g_hoveredApptMore.exchange(false)) {
+                g_layoutDirty = true;
+            }
             if (g_hoveredFileTrayRow.exchange(-1) != -1) {
                 g_layoutDirty = true;
             }
@@ -575,10 +606,14 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     return 0;
                 }
                 std::vector<IslandKind> kinds;
+                bool mediaPaused = false;
+                uint64_t mediaKey = 0;
                 {
                     std::lock_guard lock(g_stateMutex);
-                    mediaActive = g_settings.media && g_state.media.available;
+                    mediaActive = MediaVisible(g_state, g_settings);
                     kinds = ChooseActivities(g_state, g_settings, NowSeconds());
+                    mediaPaused = !g_state.media.playing;
+                    mediaKey = MediaSessionKey(g_state.media);
                 }
 
                 // Song recognition card: open the track when found, otherwise dismiss / cancel.
@@ -627,6 +662,15 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 const int currentTab = NormalizedTabIndex(g_settings);
 
                 const MediaContentPoint cp = MediaContentFromClient(xPos, yPos);
+
+                // Appointments tab: the "+N more" line shows the next page.
+                if (AppointmentsTabEnabled(g_settings) && currentTab == AppointmentsTabIndex(g_settings) &&
+                    ApptMoreHitTest(cp)) {
+                    g_apptPageStart = g_apptNextPageStart.load(std::memory_order_relaxed);
+                    g_hoveredApptMore = false;
+                    g_layoutDirty = true;
+                    return 0;
+                }
 
                 // File Tray: the bin clears the shelf, the cut button removes one file,
                 // and a plain click on a row opens it with its default app. (Dragging a
@@ -711,6 +755,14 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 }
 
                 if (mediaActive && currentTab == MediaTabIndex(g_settings)) {
+                    // X of a paused player: dismiss this session until it plays again.
+                    if (mediaPaused && MediaDismissHitTest(cp)) {
+                        g_mediaDismissedKey.store(mediaKey, std::memory_order_relaxed);
+                        g_hoveredMediaDismiss = false;
+                        g_layoutDirty = true;
+                        return 0;
+                    }
+
                     // Source dock: "+N" opens the list, another slot switches to it.
                     {
                         const DockHit dock = ResolveSourceDockHit(cp);
@@ -737,6 +789,19 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     if (cmd != -1) {
                         if (cmd == 0) g_skipTriggerPrev.fetch_add(1);
                         else if (cmd == 2) g_skipTriggerNext.fetch_add(1);
+                        if (cmd == 1) {
+                            // Remember a pause done here, so the island can move on to
+                            // another playing app once it collapses (ChooseMediaSourceAumid).
+                            std::wstring aumid;
+                            bool wasPlaying = false;
+                            {
+                                std::lock_guard lock(g_stateMutex);
+                                aumid = g_state.media.sourceAppUserModelId;
+                                wasPlaying = g_state.media.playing;
+                            }
+                            std::lock_guard lock(g_mediaSourceMutex);
+                            g_islandPausedAumid = wasPlaying ? aumid : std::wstring();
+                        }
                         g_layoutDirty = true;
                         SendMediaTransportCommand(cmd);
                         return 0;

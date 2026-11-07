@@ -259,9 +259,21 @@
   - MediaAutoExpand: false
     $name: Auto-expand on track change
     $description: Automatically expand the island when a new song or video starts playing. If disabled, album art updates smoothly in the collapsed pill without unprompted expansion.
+  - MediaPillInfo: true
+    $name: Keep clock and weather in the collapsed media pill
+    $description: "While something plays that has no lyrics to show (a video, a stream in the browser, a podcast), the collapsed media pill keeps the clock and the weather on its left, next to the cover and the sound waves, instead of hiding them. Hovering still opens the player. When a lyric line is shown, the pill falls back to the clock option below."
   - MediaPillClock: false
     $name: Show clock in the collapsed media pill
     $description: While media is playing, the collapsed pill also shows the current time on the left, separated from the album cover by a thin divider. Hovering still opens the normal player. Uses the same 12h/24h and seconds options as the clock below. Off by default.
+  - ClaudeUsage: false
+    $name: Claude usage tab (session and weekly limit)
+    $description: "Adds a tab with how much of your Claude plan's 5-hour session limit and weekly limit is used, and when each resets. Anthropic shows these as percentages, not token counts. The numbers come from a small file that Claude Code's status line script writes (claude-usage-statusline.ps1, see the mod readme), so they only update while Claude Code is in use."
+  - ClaudeUsageFile: ""
+    $name: Claude usage file (optional)
+    $description: "Path of the JSON file written by the status line script. Leave empty for %USERPROFILE%\\.claude\\island-usage.json."
+  - MediaPausedShowsClock: true
+    $name: Show clock, weather and appointments while paused
+    $description: "When the player is paused, the collapsed island switches back to the idle view (clock, weather, next appointment) instead of keeping the paused track and its lyrics on screen. Open the island (hover or click) and the paused player is still there, so you can resume it; its X button removes it until it plays again. Playback resumes the media view on its own. Turn off to keep the old behaviour."
   - Volume: true
     $name: Volume slider flyout
     $description: Shows a volume slider banner on the island when adjusting system volume. Disable if you prefer the default Windows volume flyout.
@@ -316,6 +328,24 @@
   - WeatherFahrenheit: false
     $name: Use Fahrenheit
     $description: Display weather temperature and wind speed in imperial units.
+  - Appointments: false
+    $name: Next appointment (Google Calendar)
+    $description: "Shows your next appointment of the day. Collapsed island: a calendar icon with a countdown (<5h ... <1m, now). Start page: a line under the date with the time and title. Needs at least one calendar feed below."
+  - AppointmentFeeds:
+    - - Name: ""
+        $name: Name
+        $description: Shown for this calendar, so several feeds stay apart. Leave empty for "Calendar 1", "Calendar 2" and so on.
+      - Enabled: true
+        $name: Enabled
+        $description: Turn off to hide this calendar without deleting its address.
+      - Color: ""
+        $name: Colour (optional)
+        $description: "Hex colour like #4285F4 for the bar next to its appointments. Leave empty for an automatic colour."
+      - Url: ""
+        $name: Secret iCal address
+        $description: "In Google Calendar open the calendar's settings and copy 'Secret address in iCal format'. Treat it like a password."
+    $name: Calendar feeds
+    $description: "One entry per calendar, up to 8. Give each one a name, and switch a calendar off to hide it without losing its address."
   - MediaTabLyrics: false
     $name: Lyrics in the media tab
     $description: Adds a lyrics button to the media player controls to toggle an immersive lyrics view over the media tab. Can also be toggled from the right-click menu.

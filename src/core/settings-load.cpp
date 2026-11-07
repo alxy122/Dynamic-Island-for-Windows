@@ -299,6 +299,7 @@ void LoadSettings() {
         next.firstDayOfWeek = -1;
     }
     next.mediaPillClock = Wh_GetIntSetting(L"Modules.MediaPillClock") != 0;
+    next.mediaPausedShowsClock = Wh_GetIntSetting(L"Modules.MediaPausedShowsClock") != 0;
 
     // ── Localization (#35) ───────────────────────────────────────────────────
     {
@@ -394,6 +395,40 @@ void LoadSettings() {
     next.weather = Wh_GetIntSetting(L"Modules.Weather") != 0;
     next.weatherCity = GetStringSettingWithFallback(L"Modules.WeatherCity", L"Weather.WeatherCity", L"CalendarWeather.WeatherCity");
     next.weatherFahrenheit = Wh_GetIntSetting(L"Modules.WeatherFahrenheit") != 0;
+    next.appointments = Wh_GetIntSetting(L"Modules.Appointments") != 0;
+    next.claudeUsage = Wh_GetIntSetting(L"Modules.ClaudeUsage") != 0;
+    next.claudeUsageFile = GetStringSettingCopy(L"Modules.ClaudeUsageFile");
+    // Each feed becomes "Name|#RRGGBB|URL" (see ParseCalendarSources). Switched-off
+    // feeds are left out; they keep their address in the settings.
+    next.appointmentCalendars.clear();
+    bool anyFeedUrl = false;
+    for (int i = 0; i < 8; ++i) {
+        wchar_t key[96];
+        swprintf_s(key, L"Modules.AppointmentFeeds[%d].Url", i);
+        const std::wstring url = GetStringSettingCopy(key);
+        if (url.empty()) continue;
+        anyFeedUrl = true;
+        swprintf_s(key, L"Modules.AppointmentFeeds[%d].Enabled", i);
+        if (Wh_GetIntSetting(key) == 0) continue;
+        swprintf_s(key, L"Modules.AppointmentFeeds[%d].Name", i);
+        std::wstring name = GetStringSettingCopy(key);
+        std::replace(name.begin(), name.end(), L'|', L' ');
+        swprintf_s(key, L"Modules.AppointmentFeeds[%d].Color", i);
+        std::wstring color = GetStringSettingCopy(key);
+        std::replace(color.begin(), color.end(), L'|', L' ');
+        next.appointmentCalendars.push_back(name + L"|" + color + L"|" + url);
+    }
+    // Older versions stored each feed as one "Name|#RRGGBB|URL" string.
+    if (!anyFeedUrl) {
+        for (int i = 0; i < 8; ++i) {
+            wchar_t key[64];
+            swprintf_s(key, L"Modules.AppointmentCalendars[%d]", i);
+            std::wstring entry = GetStringSettingCopy(key);
+            if (!entry.empty()) {
+                next.appointmentCalendars.push_back(std::move(entry));
+            }
+        }
+    }
     next.lyrics = Wh_GetIntSetting(L"Modules.Lyrics") != 0;
     next.lyricsVisualizer = Wh_GetIntSetting(L"Modules.LyricsVisualizer") != 0;
     next.karaokeLyrics = Wh_GetIntSetting(L"Modules.KaraokeLyrics") != 0;
@@ -424,6 +459,7 @@ void LoadSettings() {
     next.expandOnHover = localExpandOnHover >= 0 ? (localExpandOnHover != 0) : (Wh_GetIntSetting(L"Behavior.ExpandOnHover") != 0);
     // Right-click toggle; stored with Wh_SetIntValue so it survives restarts.
     next.collapsedLyrics = Wh_GetIntValue(L"CollapsedLyrics", 0) != 0;
+    next.mediaPillInfo = Wh_GetIntSetting(L"Modules.MediaPillInfo") != 0;
     next.lyricsPinnedFirst = Wh_GetIntValue(L"LyricsPinnedFirst", 0) != 0;
     {
         // Right-click choice wins until the Mod Settings value is changed.
@@ -678,12 +714,15 @@ void LoadSettings() {
     // this, both could read the same "old" values and each decide a hotkey
     // re-registration was needed, or neither would.
     bool cityChanged = false;
+    bool calendarChanged = false;
     bool hotkeySettingChanged = false;
     bool backdropChanged = false;
     bool capsLockChanged = false;
     {
         std::lock_guard lock(g_settingsMutex);
         cityChanged = next.weatherCity != g_settings.weatherCity;
+        calendarChanged = next.appointments != g_settings.appointments ||
+                          next.appointmentCalendars != g_settings.appointmentCalendars;
         capsLockChanged = next.capsLock != g_settings.capsLock;
         hotkeySettingChanged =
             next.hideShowHotkeyEnabled != g_settings.hideShowHotkeyEnabled ||
@@ -705,6 +744,9 @@ void LoadSettings() {
     g_layoutDirty = true;
     if (cityChanged && g_settingsChangedEvent) {
         SetEvent(g_settingsChangedEvent);
+    }
+    if (calendarChanged && g_calendarRefreshEvent) {
+        SetEvent(g_calendarRefreshEvent);
     }
     // Installs or removes WH_KEYBOARD_LL to match. The keyboard thread would pick
     // this up on its next backstop tick anyway; this just makes it immediate.

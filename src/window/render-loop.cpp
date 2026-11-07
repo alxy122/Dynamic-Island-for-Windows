@@ -324,7 +324,7 @@ DWORD WINAPI RenderThreadProc(void*) {
 
         const std::vector<IslandKind> kinds = ChooseActivities(snapshot, g_settings, now);
         g_lyricsTabAvailable.store(
-            g_settings.lyrics && g_settings.media && snapshot.media.available,
+            g_settings.lyrics && MediaVisible(snapshot, g_settings),
             std::memory_order_relaxed);
         Activity primary = ActivityForKind(kinds[0], g_settings, snapshot);
         std::optional<Activity> secondary;
@@ -452,6 +452,18 @@ DWORD WINAPI RenderThreadProc(void*) {
             lastInteractionTime = now;
         }
 
+        // A paused player comes back while the island is open (see MediaVisible).
+        // The activities for this frame are already chosen, so the switch happens
+        // on the next one.
+        if (g_islandOpen.exchange(isHoverExpanded || pinned) != (isHoverExpanded || pinned)) {
+            g_layoutDirty = true;
+            // Collapsed: let the media thread re-pick the source right away
+            // (a player paused from the island hands over to one still playing).
+            if (!(isHoverExpanded || pinned) && g_mediaRefreshEvent) {
+                SetEvent(g_mediaRefreshEvent);
+            }
+        }
+
         bool isHidden = false;
         if (!unhideGraceActive) {
             if (g_settings.autoHideIdleSeconds == -1 && !isTransientAlert && !isHoverExpanded && !hoverUnhides && !pinned) {
@@ -567,17 +579,29 @@ DWORD WINAPI RenderThreadProc(void*) {
                 primary.height = MediaLayout::kExpandedHeight * g_settings.sizeScale;
                 // (Immersive lyrics: the island keeps its normal 380px width.)
             } else {
-                // Optional clock section on the left of the collapsed pill.
-                const float clockSection = g_settings.mediaPillClock
-                    ? renderer.MeasureMediaPill(snapshot, g_settings).sectionWidth
-                    : 0.0f;
+                // Optional info section (clock, weather) on the left of the collapsed pill.
+                const MediaPillMetrics pill = renderer.MeasureMediaPill(snapshot, g_settings);
+                const float clockSection = pill.sectionWidth;
+                // The lyrics thread only works while lyrics are on screen. The
+                // pill now stays narrow until lyrics are found, so keep it looking
+                // for as long as the collapsed pill could show them.
+                if (g_settings.collapsedLyrics) {
+                    g_lastLyricsViewTime.store(NowSeconds(), std::memory_order_relaxed);
+                }
                 if (CollapsedLyricsActive(snapshot, g_settings)) {
                     // Collapsed but carrying lyrics: wider pill, same height.
                     primary.width = (kCollapsedLyricsWidth + clockSection) * g_settings.sizeScale;
-                } else if (g_settings.mediaPillClock) {
-                    primary.width = (MediaPillLayout::kBaseWidth + clockSection) * g_settings.sizeScale;
+                } else if (clockSection > 0.0f) {
+                    primary.width = pill.totalWidth * g_settings.sizeScale;
                 }
             }
+        }
+
+        // Media as the second pill next to a notification: just the sound waves.
+        if (secondary && secondary->kind == IslandKind::Media) {
+            const bool privacy = snapshot.system.micActive || snapshot.system.cameraActive;
+            secondary->width = (MediaPillLayout::kWavesOnlyWidth +
+                                (privacy ? MediaPillLayout::kPrivacyShift : 0.0f)) * g_settings.sizeScale;
         }
 
         if (primary.kind == IslandKind::SongId) {
@@ -844,7 +868,7 @@ DWORD WINAPI RenderThreadProc(void*) {
         static SYSTEMTIME prevTime = {};
         const bool clockOnScreen = !stripActive &&
             (primary.kind == IslandKind::Idle ||
-             (primary.kind == IslandKind::Media && g_settings.mediaPillClock));
+             (primary.kind == IslandKind::Media && (g_settings.mediaPillClock || g_settings.mediaPillInfo)));
         if (clockOnScreen && !isHidden) {
             SYSTEMTIME local = {};
             GetLocalTime(&local);
