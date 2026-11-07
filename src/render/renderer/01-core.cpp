@@ -402,6 +402,21 @@ class Renderer {
             metrics.slots.push_back(std::move(weather));
         }
 
+        // Next appointment, as in the idle strip: only in its last 5 hours.
+        if (infoMode) {
+            AppointmentInfo appt;
+            if (GetNextAppointment(state, settings, appt)) {
+                const char* bucket = ics::BucketLabel(appt.secsUntil);
+                if (*bucket) {
+                    MediaPillSlot slot;
+                    slot.text = L"\U0001F4C5 " + ApptUtf8ToWide(bucket);
+                    slot.width = MeasureTextWidthCached(WidestDigitForm(slot.text), fmt, idleApptWidthCache_);
+                    slot.colorFont = true;
+                    metrics.slots.push_back(std::move(slot));
+                }
+            }
+        }
+
         float section = MediaPillLayout::kClockPadLeft;
         for (size_t i = 0; i < metrics.slots.size(); ++i) {
             if (i > 0) section += MediaPillLayout::kSlotGap;
