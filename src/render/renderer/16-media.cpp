@@ -130,6 +130,7 @@
             if (lyricsFirst) activeTabs.push_back(5);  // Lyrics (pinned first)
             activeTabs.push_back(0); // Media
             activeTabs.push_back(1); // Calendar
+            if (AppointmentsTabEnabled(settings)) activeTabs.push_back(6); // Appointments
             if (settings.weather) activeTabs.push_back(2);
             if (settings.hardwareMonitorModule) activeTabs.push_back(3);
             if (settings.fileTrayModule) activeTabs.push_back(4);
@@ -370,6 +371,8 @@
             } else if (activeTabId == 1) {
                 SYSTEMTIME local = {}; GetLocalTime(&local);
                 DrawCalendarDashboard(state, rect, settings, now, 1.0f, local);
+            } else if (activeTabId == 6) {
+                DrawAppointmentsDashboard(state, rect, settings, 1.0f);
             } else if (activeTabId == 2) {
                 bool hasWeather = state.weather.hasData && (now - state.weather.lastUpdated < 3600.0);
                 std::wstring wIcon = L"🌡️"; std::wstring wText = Loc(L"Loading...");
@@ -406,6 +409,7 @@
         // Collapsed UI
         if (collapsedAlpha > 0.01f && mask && layer && !g_trayDragOver.load(std::memory_order_relaxed)) {
             g_idleTab = 0;
+            g_apptPageStart = 0;
             ResetTabTransition();
             target_->PushLayer(D2D1::LayerParameters(rect, mask.Get(), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1::IdentityMatrix(), collapsedAlpha, nullptr, D2D1_LAYER_OPTIONS_NONE), layer);;
 

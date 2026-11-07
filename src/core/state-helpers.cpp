@@ -145,8 +145,15 @@ std::wstring FormatWithName(const wchar_t* format, const std::wstring& name) {
 // renderer, the scroll handler and the hit tests can all share this. That
 // arithmetic used to be copy-pasted in seven places, which is exactly how they
 // drifted out of sync.
+// The appointments list tab sits right after the calendar. It exists once the
+// feature is on and at least one calendar feed is configured.
+bool AppointmentsTabEnabled(const Settings& settings) {
+    return settings.appointments && !settings.appointmentCalendars.empty();
+}
+
 int ActiveTabCount(const Settings& settings) {
     int count = 2;  // primary (media or clock) + calendar
+    if (AppointmentsTabEnabled(settings)) ++count;
     if (settings.weather) ++count;
     if (settings.hardwareMonitorModule) ++count;
     if (settings.fileTrayModule) ++count;
@@ -160,7 +167,7 @@ int NormalizedTabIndex(const Settings& settings) {
     return ((raw % total) + total) % total;
 }
 
-// Tab order is always: primary, calendar, weather?, hardware?, file tray?
+// Tab order is always: primary, calendar, appointments?, weather?, hardware?, file tray?
 // The expensive GPU / network counters are only sampled while the hardware card
 // is actually on screen, so that check needs the card's real index rather than
 // assuming it is the last tab -- which stopped being true once the File Tray
@@ -177,15 +184,29 @@ int HardwareMonitorTabIndex(const Settings& settings) {
     if (!settings.hardwareMonitorModule) {
         return -1;
     }
-    return 2 + (settings.weather ? 1 : 0) + MediaTabIndex(settings);
+    return 2 + (AppointmentsTabEnabled(settings) ? 1 : 0) +
+           (settings.weather ? 1 : 0) + MediaTabIndex(settings);
 }
 
 int FileTrayTabIndex(const Settings& settings) {
     if (!settings.fileTrayModule) {
         return -1;
     }
-    return 2 + (settings.weather ? 1 : 0) + (settings.hardwareMonitorModule ? 1 : 0) +
-           MediaTabIndex(settings);
+    return 2 + (AppointmentsTabEnabled(settings) ? 1 : 0) +
+           (settings.weather ? 1 : 0) + (settings.hardwareMonitorModule ? 1 : 0) + MediaTabIndex(settings);
+}
+
+int AppointmentsTabIndex(const Settings& settings) {
+    return AppointmentsTabEnabled(settings) ? 2 + MediaTabIndex(settings) : -1;
+}
+
+// Is the point (content space) on the Appointments tab's "+N more" line?
+bool ApptMoreHitTest(const MediaContentPoint& cp) {
+    if (!cp.valid || !g_apptMoreValid.load(std::memory_order_relaxed)) return false;
+    return cp.x >= g_apptMoreL.load(std::memory_order_relaxed) &&
+           cp.x <= g_apptMoreR.load(std::memory_order_relaxed) &&
+           cp.y >= g_apptMoreT.load(std::memory_order_relaxed) &&
+           cp.y <= g_apptMoreB.load(std::memory_order_relaxed);
 }
 
 // Moves the dashboard one tab (+1 = next, -1 = previous). Clamped at both ends:

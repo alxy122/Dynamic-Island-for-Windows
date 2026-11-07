@@ -317,6 +317,21 @@ class Renderer {
                 MeasureTextWidthCached(WidestDigitForm(label), fmt, idleWeatherWidthCache_);
         }
 
+        // Next appointment today: only inside the last 5 hours, as a calendar icon
+        // plus the countdown bucket. Further away it is simply not shown here.
+        {
+            AppointmentInfo appt;
+            if (GetNextAppointment(state, settings, appt)) {
+                const char* bucket = ics::BucketLabel(appt.secsUntil);
+                if (*bucket) {
+                    metrics.apptLabel = L"\U0001F4C5 " + ApptUtf8ToWide(bucket);
+                    metrics.hasAppt = true;
+                    metrics.apptWidth = MeasureTextWidthCached(WidestDigitForm(metrics.apptLabel), fmt,
+                                                               idleApptWidthCache_);
+                }
+            }
+        }
+
         metrics.hasPrivacy =
             (state.system.micActive && settings.privacyDots && settings.privacyDotsMic) ||
             (state.system.cameraActive && settings.privacyDots && settings.privacyDotsCam);
@@ -325,6 +340,9 @@ class Renderer {
         if (metrics.hasWeather) {
             total += IdleStripLayout::kSlotGap * 2.0f + IdleStripLayout::kDividerWidth +
                      metrics.weatherWidth;
+        }
+        if (metrics.hasAppt) {
+            total += IdleStripLayout::kSlotGap * 2.0f + IdleStripLayout::kDividerWidth + metrics.apptWidth;
         }
         if (metrics.hasPrivacy) {
             total += IdleStripLayout::kPrivacyReserve;
@@ -376,6 +394,7 @@ class Renderer {
     };
     TextWidthCache idleClockWidthCache_;
     TextWidthCache idleWeatherWidthCache_;
+    TextWidthCache idleApptWidthCache_;
 
     float MeasureTextWidthCached(const std::wstring& text, IDWriteTextFormat* fmt,
                                  TextWidthCache& cache) {
@@ -479,6 +498,7 @@ class Renderer {
         // width measured against the old ones is stale.
         idleClockWidthCache_.valid = false;
         idleWeatherWidthCache_.valid = false;
+        idleApptWidthCache_.valid = false;
 
         textFormat_ = nullptr;
         smallTextFormat_ = nullptr;

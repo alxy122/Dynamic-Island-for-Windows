@@ -78,7 +78,10 @@ struct MarqueeLayoutCache {
 struct IdleStripMetrics {
     float clockWidth = 0.0f;
     float weatherWidth = 0.0f;
+    float apptWidth = 0.0f;
+    std::wstring apptLabel;  // calendar icon + countdown bucket
     bool hasWeather = false;
+    bool hasAppt = false;
     bool hasPrivacy = false;
     float totalWidth = IdleStripLayout::kMinWidth;
 };

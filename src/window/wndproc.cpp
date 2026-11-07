@@ -283,6 +283,13 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     }
                 }
 
+                // The Appointments "+N more" line is clickable.
+                if (AppointmentsTabEnabled(g_settings) && currentTab == AppointmentsTabIndex(g_settings) &&
+                    g_hoveredApptMore.load(std::memory_order_relaxed)) {
+                    SetCursor(LoadCursorW(nullptr, IDC_HAND));
+                    return TRUE;
+                }
+
                 // A File Tray row under the cursor is clickable (opens the file).
                 if (g_settings.fileTrayModule && currentTab == FileTrayTabIndex(g_settings) &&
                     (g_hoveredFileTrayRow.load(std::memory_order_relaxed) >= 0 ||
@@ -460,6 +467,13 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     hoveredAction = hoveredRow;
                 }
             }
+            bool apptHover = false;
+            if (AppointmentsTabEnabled(g_settings) && currentTab == AppointmentsTabIndex(g_settings)) {
+                apptHover = ApptMoreHitTest(MediaContentFromClient(xPos, yPos));
+            }
+            if (g_hoveredApptMore.exchange(apptHover) != apptHover) {
+                g_layoutDirty = true;
+            }
             bool trayHoverChanged = false;
             if (g_hoveredFileTrayRow.exchange(hoveredRow) != hoveredRow) {
                 trayHoverChanged = true;
@@ -497,6 +511,9 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 g_layoutDirty = true;
             }
             s_trayPressActive = false;
+            if (g_hoveredApptMore.exchange(false)) {
+                g_layoutDirty = true;
+            }
             if (g_hoveredFileTrayRow.exchange(-1) != -1) {
                 g_layoutDirty = true;
             }
@@ -627,6 +644,15 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 const int currentTab = NormalizedTabIndex(g_settings);
 
                 const MediaContentPoint cp = MediaContentFromClient(xPos, yPos);
+
+                // Appointments tab: the "+N more" line shows the next page.
+                if (AppointmentsTabEnabled(g_settings) && currentTab == AppointmentsTabIndex(g_settings) &&
+                    ApptMoreHitTest(cp)) {
+                    g_apptPageStart = g_apptNextPageStart.load(std::memory_order_relaxed);
+                    g_hoveredApptMore = false;
+                    g_layoutDirty = true;
+                    return 0;
+                }
 
                 // File Tray: the bin clears the shelf, the cut button removes one file,
                 // and a plain click on a row opens it with its default app. (Dragging a

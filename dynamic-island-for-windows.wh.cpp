@@ -32,6 +32,7 @@ The Dynamic Island intelligently expands to display context-aware dashboards. Yo
 | **Live Lyrics** | Real-time synchronized lyrics with inline collapsed view and full lyrics tab. | ![Live Lyrics](https://raw.githubusercontent.com/devcode90/Dynamic-Island-for-Windows/main/previews/lyrics.png) |
 | **Blur & Acrylic** | Genuine Windows DWM blur and acrylic backdrop effects for modern depth. | ![Blur & Acrylic](https://raw.githubusercontent.com/devcode90/Dynamic-Island-for-Windows/main/previews/blur-acrylic.png) |
 | **Calendar** | A monthly grid that always fits its rows, with today marked in the accent colour. | ![Calendar](https://raw.githubusercontent.com/devcode90/Dynamic-Island-for-Windows/793cf954d51aa9748c39d544187fab6e25ecd0fb/previews/calendar.png) |
+| **Next Appointment** | Reads your Google Calendars through their secret iCal addresses. The collapsed island shows a calendar icon with a countdown in the last 5 hours before today's next appointment, the start page shows it under the date. | |
 | **Weather** | Real-time weather stats powered by wttr.in, including wind speed, humidity, and "feels like" temperature. | ![Weather](https://raw.githubusercontent.com/devcode90/Dynamic-Island-for-Windows/793cf954d51aa9748c39d544187fab6e25ecd0fb/previews/weather-v2.png) |
 | **Hardware Monitor** | CPU, RAM, GPU, disk and live network throughput, with load bars that turn amber past 75% and red past 90%. | ![Hardware Monitor](https://raw.githubusercontent.com/devcode90/Dynamic-Island-for-Windows/793cf954d51aa9748c39d544187fab6e25ecd0fb/previews/hardware-monitor.png) |
 | **Game Overlay** | Real-time FPS, CPU, GPU, RAM and disk, sized to whichever metrics you enable. | ![Gamebar](https://raw.githubusercontent.com/devcode90/Dynamic-Island-for-Windows/793cf954d51aa9748c39d544187fab6e25ecd0fb/previews/gamebar-v2.png) |
@@ -434,6 +435,12 @@ We love community contributions! To ensure high-quality updates, please follow t
   - WeatherFahrenheit: false
     $name: Use Fahrenheit
     $description: Display weather temperature and wind speed in imperial units.
+  - Appointments: false
+    $name: Next appointment (Google Calendar)
+    $description: "Shows your next appointment of the day. Collapsed island: a calendar icon with a countdown (<5h ... <1m, now). Start page: a line under the date with the time and title. Needs at least one calendar feed below."
+  - AppointmentCalendars: [""]
+    $name: Calendar feeds (secret iCal addresses)
+    $description: "One entry per calendar, written as Name|#RRGGBB|URL. Name and colour are optional, the bare URL works too. In Google Calendar open the calendar's settings and copy 'Secret address in iCal format'. Treat that URL like a password. Up to 8 calendars."
   - MediaTabLyrics: false
     $name: Lyrics in the media tab
     $description: Adds a lyrics button to the media player controls to toggle an immersive lyrics view over the media tab. Can also be toggled from the right-click menu.
@@ -665,6 +672,7 @@ We love community contributions! To ensure high-quality updates, please follow t
 #include <utility>
 #include <vector>
 #include <set>
+#include <map>
 #include <winrt/base.h>
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Foundation.Collections.h>
@@ -1273,6 +1281,8 @@ struct Settings {
     bool weather = true;
     std::wstring weatherCity;
     bool weatherFahrenheit = false;
+    bool appointments = false;                        // Modules.Appointments
+    std::vector<std::wstring> appointmentCalendars;   // Modules.AppointmentCalendars[i]
     bool lyrics = false;
     bool lyricsVisualizer = true;
     bool karaokeLyrics = true;
@@ -1673,6 +1683,22 @@ struct LookupUiState {
 };
 LookupUiState g_lookupUi;
 
+// One appointment from a calendar feed (UTC epoch seconds).
+struct CalEvent {
+    int64_t startUtc = 0;
+    int64_t endUtc = 0;
+    bool allDay = false;
+    std::wstring title;
+    uint32_t color = 0x4285F4;  // 0xRRGGBB
+};
+
+// Published by CalendarThreadProc; the vector is immutable once shared, so the
+// per-frame SharedState copy only bumps a reference count.
+struct CalendarSnapshot {
+    bool hasData = false;
+    std::shared_ptr<const std::vector<CalEvent>> events;
+};
+
 enum class SongIdStatus {
     Listening,
     Matching,
@@ -1714,6 +1740,7 @@ struct SharedState {
     ProgressSnapshot progress;
     SystemSnapshot system;
     WeatherSnapshot weather;
+    CalendarSnapshot calendar;
     LyricsSnapshot lyrics;
     LookupSnapshot lookup;
     std::vector<LookupRecent> lookupRecent;  // newest first, guarded by g_stateMutex
@@ -1786,6 +1813,8 @@ HANDLE g_renderThread = nullptr;
 HANDLE g_mediaThread = nullptr;
 HANDLE g_audioThread = nullptr;
 HANDLE g_weatherThread = nullptr;
+HANDLE g_calendarThread = nullptr;
+HANDLE g_calendarRefreshEvent = nullptr;  // wakes CalendarThreadProc
 HANDLE g_lyricsThread = nullptr;
 HANDLE g_notificationThread = nullptr;
 HANDLE g_bluetoothThread = nullptr;
@@ -1823,6 +1852,14 @@ HANDLE g_mediaRefreshEvent = nullptr;              // wakes MediaThreadProc
 std::atomic<int> g_hoveredSourceSlot{-1};
 std::atomic<int> g_pressedSourceSlot{-1};
 std::atomic<int> g_hoveredFileTrayRow = -1;  // row index under the cursor on the File Tray card
+
+// Appointments tab paging. The wheel switches tabs, so a long list is paged by
+// clicking the "+N more" line at its foot.
+std::atomic<int> g_apptPageStart{0};       // first row of the list shown right now
+std::atomic<int> g_apptNextPageStart{0};   // where a click on the foot line goes (0 = back to the top)
+std::atomic<bool> g_apptMoreValid{false};  // the foot line was drawn this frame
+std::atomic<bool> g_hoveredApptMore{false};
+std::atomic<float> g_apptMoreL{0.0f}, g_apptMoreT{0.0f}, g_apptMoreR{0.0f}, g_apptMoreB{0.0f};
 std::atomic<int> g_hoveredFileTrayAction = -1;  // -2 = bin, -3 = paste, -4 = previous page, -5 = next page, >=0 = cut button of that row
 std::atomic<int> g_fileTrayScroll{0};           // index of the first visible row (newest-first order)
 std::atomic<bool> g_fileTrayPagerOn{true};      // Modules.FileTrayNavigation: pager shown
@@ -2025,8 +2062,15 @@ std::wstring FormatWithName(const wchar_t* format, const std::wstring& name) {
 // renderer, the scroll handler and the hit tests can all share this. That
 // arithmetic used to be copy-pasted in seven places, which is exactly how they
 // drifted out of sync.
+// The appointments list tab sits right after the calendar. It exists once the
+// feature is on and at least one calendar feed is configured.
+bool AppointmentsTabEnabled(const Settings& settings) {
+    return settings.appointments && !settings.appointmentCalendars.empty();
+}
+
 int ActiveTabCount(const Settings& settings) {
     int count = 2;  // primary (media or clock) + calendar
+    if (AppointmentsTabEnabled(settings)) ++count;
     if (settings.weather) ++count;
     if (settings.hardwareMonitorModule) ++count;
     if (settings.fileTrayModule) ++count;
@@ -2040,7 +2084,7 @@ int NormalizedTabIndex(const Settings& settings) {
     return ((raw % total) + total) % total;
 }
 
-// Tab order is always: primary, calendar, weather?, hardware?, file tray?
+// Tab order is always: primary, calendar, appointments?, weather?, hardware?, file tray?
 // The expensive GPU / network counters are only sampled while the hardware card
 // is actually on screen, so that check needs the card's real index rather than
 // assuming it is the last tab -- which stopped being true once the File Tray
@@ -2057,15 +2101,29 @@ int HardwareMonitorTabIndex(const Settings& settings) {
     if (!settings.hardwareMonitorModule) {
         return -1;
     }
-    return 2 + (settings.weather ? 1 : 0) + MediaTabIndex(settings);
+    return 2 + (AppointmentsTabEnabled(settings) ? 1 : 0) +
+           (settings.weather ? 1 : 0) + MediaTabIndex(settings);
 }
 
 int FileTrayTabIndex(const Settings& settings) {
     if (!settings.fileTrayModule) {
         return -1;
     }
-    return 2 + (settings.weather ? 1 : 0) + (settings.hardwareMonitorModule ? 1 : 0) +
-           MediaTabIndex(settings);
+    return 2 + (AppointmentsTabEnabled(settings) ? 1 : 0) +
+           (settings.weather ? 1 : 0) + (settings.hardwareMonitorModule ? 1 : 0) + MediaTabIndex(settings);
+}
+
+int AppointmentsTabIndex(const Settings& settings) {
+    return AppointmentsTabEnabled(settings) ? 2 + MediaTabIndex(settings) : -1;
+}
+
+// Is the point (content space) on the Appointments tab's "+N more" line?
+bool ApptMoreHitTest(const MediaContentPoint& cp) {
+    if (!cp.valid || !g_apptMoreValid.load(std::memory_order_relaxed)) return false;
+    return cp.x >= g_apptMoreL.load(std::memory_order_relaxed) &&
+           cp.x <= g_apptMoreR.load(std::memory_order_relaxed) &&
+           cp.y >= g_apptMoreT.load(std::memory_order_relaxed) &&
+           cp.y <= g_apptMoreB.load(std::memory_order_relaxed);
 }
 
 // Moves the dashboard one tab (+1 = next, -1 = previous). Clamped at both ends:
@@ -2198,6 +2256,13 @@ const wchar_t* Loc(const wchar_t* english) {
     static const Row kRows[] = {
         {L"Media", {nullptr, L"Média", L"Multimedia", L"Medien", L"Mídia", L"Media", L"Медиа", L"Medya", L"मीडिया", L"媒体", L"メディア", L"미디어"}},
         {L"Calendar", {nullptr, L"Calendrier", L"Calendario", L"Kalender", L"Calendário", L"Calendario", L"Календарь", L"Takvim", L"कैलेंडर", L"日历", L"カレンダー", L"캘린더"}},
+        {L"Appointments", {nullptr, L"Rendez-vous", L"Citas", L"Termine", L"Compromissos", L"Appuntamenti", L"Встречи", L"Randevular", L"अपॉइंटमेंट", L"日程", L"予定", L"일정"}},
+        {L"Today", {nullptr, L"Aujourd'hui", L"Hoy", L"Heute", L"Hoje", L"Oggi", L"Сегодня", L"Bugün", L"आज", L"今天", L"今日", L"오늘"}},
+        {L"Tomorrow", {nullptr, L"Demain", L"Mañana", L"Morgen", L"Amanhã", L"Domani", L"Завтра", L"Yarın", L"कल", L"明天", L"明日", L"내일"}},
+        {L"All day", {nullptr, L"Toute la journée", L"Todo el día", L"Ganztägig", L"O dia todo", L"Tutto il giorno", L"Весь день", L"Tüm gün", L"पूरे दिन", L"全天", L"終日", L"종일"}},
+        {L"No upcoming appointments", {nullptr, L"Aucun rendez-vous à venir", L"Sin citas próximas", L"Keine anstehenden Termine", L"Nenhum compromisso próximo", L"Nessun appuntamento in arrivo", L"Нет предстоящих событий", L"Yaklaşan randevu yok", L"कोई आगामी अपॉइंटमेंट नहीं", L"没有即将到来的日程", L"今後の予定はありません", L"예정된 일정이 없습니다"}},
+        {L"+%d more", {nullptr, L"+%d de plus", L"+%d más", L"+%d weitere", L"+%d mais", L"+%d altri", L"ещё %d", L"+%d daha", L"+%d और", L"还有 %d 项", L"他 %d 件", L"+%d개 더"}},
+        {L"Back to top", {nullptr, L"Retour en haut", L"Volver arriba", L"Nach oben", L"Voltar ao topo", L"Torna su", L"Наверх", L"Başa dön", L"शुरू में जाएं", L"回到顶部", L"先頭へ", L"맨 위로"}},
         {L"Weather", {nullptr, L"Météo", L"Tiempo", L"Wetter", L"Tempo", L"Meteo", L"Погода", L"Hava", L"मौसम", L"天气", L"天気", L"날씨"}},
         {L"Hardware Monitor", {nullptr, L"Moniteur matériel", L"Monitor de hardware", L"Hardware-Monitor", L"Monitor de hardware", L"Monitor hardware", L"Монитор системы", L"Donanım İzleme", L"हार्डवेयर मॉनिटर", L"硬件监视器", L"ハードウェア モニター", L"하드웨어 모니터"}},
         {L"File Tray", {nullptr, L"Bac à fichiers", L"Bandeja de archivos", L"Dateiablage", L"Bandeja de arquivos", L"Vassoio file", L"Файлы", L"Dosya Tepsisi", L"फ़ाइल ट्रे", L"文件托盘", L"ファイル トレイ", L"파일 트레이"}},
@@ -3377,6 +3442,16 @@ void LoadSettings() {
     next.weather = Wh_GetIntSetting(L"Modules.Weather") != 0;
     next.weatherCity = GetStringSettingWithFallback(L"Modules.WeatherCity", L"Weather.WeatherCity", L"CalendarWeather.WeatherCity");
     next.weatherFahrenheit = Wh_GetIntSetting(L"Modules.WeatherFahrenheit") != 0;
+    next.appointments = Wh_GetIntSetting(L"Modules.Appointments") != 0;
+    next.appointmentCalendars.clear();
+    for (int i = 0; i < 8; ++i) {
+        wchar_t key[64];
+        swprintf_s(key, L"Modules.AppointmentCalendars[%d]", i);
+        std::wstring entry = GetStringSettingCopy(key);
+        if (!entry.empty()) {
+            next.appointmentCalendars.push_back(std::move(entry));
+        }
+    }
     next.lyrics = Wh_GetIntSetting(L"Modules.Lyrics") != 0;
     next.lyricsVisualizer = Wh_GetIntSetting(L"Modules.LyricsVisualizer") != 0;
     next.karaokeLyrics = Wh_GetIntSetting(L"Modules.KaraokeLyrics") != 0;
@@ -3661,12 +3736,15 @@ void LoadSettings() {
     // this, both could read the same "old" values and each decide a hotkey
     // re-registration was needed, or neither would.
     bool cityChanged = false;
+    bool calendarChanged = false;
     bool hotkeySettingChanged = false;
     bool backdropChanged = false;
     bool capsLockChanged = false;
     {
         std::lock_guard lock(g_settingsMutex);
         cityChanged = next.weatherCity != g_settings.weatherCity;
+        calendarChanged = next.appointments != g_settings.appointments ||
+                          next.appointmentCalendars != g_settings.appointmentCalendars;
         capsLockChanged = next.capsLock != g_settings.capsLock;
         hotkeySettingChanged =
             next.hideShowHotkeyEnabled != g_settings.hideShowHotkeyEnabled ||
@@ -3688,6 +3766,9 @@ void LoadSettings() {
     g_layoutDirty = true;
     if (cityChanged && g_settingsChangedEvent) {
         SetEvent(g_settingsChangedEvent);
+    }
+    if (calendarChanged && g_calendarRefreshEvent) {
+        SetEvent(g_calendarRefreshEvent);
     }
     // Installs or removes WH_KEYBOARD_LL to match. The keyboard thread would pick
     // this up on its next backstop tick anyway; this just makes it immediate.
@@ -7298,6 +7379,974 @@ DWORD WINAPI WeatherThreadProc(void*) {
             // The city changed, so retry immediately at full speed.
             backoffIndex = 0;
         }
+    }
+    return 0;
+}
+
+// ==ICS-ENGINE-BEGIN==
+// -- Appointments: iCal (ICS) parsing ------------------------------------------
+// Self-contained and free of Win32 calls so it can be unit-tested off-Windows.
+// The two hooks below are the only link to the OS (floating / unknown time zones
+// fall back to the system time zone).
+int64_t SystemLocalToUtc(int64_t naiveLocal);   // wall clock -> UTC (epoch seconds)
+int64_t SystemUtcToLocalNaive(int64_t utc);     // UTC -> wall clock ("naive" seconds)
+
+namespace ics {
+
+// "Naive" time = wall clock as seconds since 1970-01-01 00:00, with no zone.
+inline int64_t DaysFromCivil(int y, unsigned m, unsigned d) {
+    y -= m <= 2;
+    const int64_t era = (y >= 0 ? y : y - 399) / 400;
+    const unsigned yoe = static_cast<unsigned>(y - era * 400);
+    const unsigned doy = (153 * (m > 2 ? m - 3 : m + 9) + 2) / 5 + d - 1;
+    const unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + static_cast<int64_t>(doe) - 719468;
+}
+
+inline void CivilFromDays(int64_t z, int& y, unsigned& m, unsigned& d) {
+    z += 719468;
+    const int64_t era = (z >= 0 ? z : z - 146096) / 146097;
+    const unsigned doe = static_cast<unsigned>(z - era * 146097);
+    const unsigned yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    const int64_t yy = static_cast<int64_t>(yoe) + era * 400;
+    const unsigned doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    const unsigned mp = (5 * doy + 2) / 153;
+    d = doy - (153 * mp + 2) / 5 + 1;
+    m = mp < 10 ? mp + 3 : mp - 9;
+    y = static_cast<int>(yy + (m <= 2 ? 1 : 0));
+}
+
+inline int64_t FloorDiv(int64_t a, int64_t b) {
+    int64_t q = a / b;
+    if ((a % b != 0) && ((a < 0) != (b < 0))) --q;
+    return q;
+}
+
+inline int DayOfWeek(int64_t days) {  // 0 = Sunday
+    int64_t r = (days + 4) % 7;
+    if (r < 0) r += 7;
+    return static_cast<int>(r);
+}
+
+inline int DaysInMonth(int y, int m) {
+    static const int kDays[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    if (m == 2 && ((y % 4 == 0 && y % 100 != 0) || y % 400 == 0)) return 29;
+    return kDays[m - 1];
+}
+
+// Day-of-month of the n-th (n>0) or last-ish (n<0) given weekday in a month.
+inline int NthWeekdayOfMonth(int y, int m, int dow, int n) {
+    if (n > 0) {
+        const int firstDow = DayOfWeek(DaysFromCivil(y, m, 1));
+        const int day = 1 + ((dow - firstDow + 7) % 7) + (n - 1) * 7;
+        return day <= DaysInMonth(y, m) ? day : 0;
+    }
+    const int last = DaysInMonth(y, m);
+    const int lastDow = DayOfWeek(DaysFromCivil(y, m, last));
+    const int day = last - ((lastDow - dow + 7) % 7) + (n + 1) * 7;
+    return day >= 1 ? day : 0;
+}
+
+struct TimeVal {
+    bool ok = false;
+    bool utc = false;       // trailing Z
+    bool dateOnly = false;  // VALUE=DATE
+    int64_t naive = 0;
+};
+
+inline bool ParseDigits(const std::string& s, size_t pos, size_t n, int& out) {
+    if (pos + n > s.size()) return false;
+    int v = 0;
+    for (size_t i = 0; i < n; ++i) {
+        const char c = s[pos + i];
+        if (c < '0' || c > '9') return false;
+        v = v * 10 + (c - '0');
+    }
+    out = v;
+    return true;
+}
+
+inline TimeVal ParseTime(const std::string& s) {
+    TimeVal t;
+    int y, mo, d;
+    if (!ParseDigits(s, 0, 4, y) || !ParseDigits(s, 4, 2, mo) || !ParseDigits(s, 6, 2, d)) return t;
+    if (mo < 1 || mo > 12 || d < 1 || d > 31) return t;
+    int hh = 0, mi = 0, ss = 0;
+    if (s.size() >= 15 && s[8] == 'T') {
+        if (!ParseDigits(s, 9, 2, hh) || !ParseDigits(s, 11, 2, mi) || !ParseDigits(s, 13, 2, ss)) return t;
+        t.utc = s.size() >= 16 && s[15] == 'Z';
+    } else {
+        t.dateOnly = true;
+    }
+    t.naive = DaysFromCivil(y, mo, d) * 86400 + hh * 3600 + mi * 60 + ss;
+    t.ok = true;
+    return t;
+}
+
+// ---- time zones (from the feed's own VTIMEZONE blocks) ------------------------
+struct TzRule {
+    int month = 0;   // 1..12
+    int week = 0;    // 1..4, -1 = last
+    int dow = 0;     // 0 = Sunday
+    int secs = 0;    // local time of day of the switch
+    bool valid = false;
+};
+
+struct Tz {
+    bool hasRules = false;
+    int stdOffset = 0;  // seconds east of UTC
+    int dstOffset = 0;
+    bool hasDst = false;
+    TzRule dstStart;    // wall clock before the switch (standard time)
+    TzRule dstEnd;      // wall clock before the switch (daylight time)
+};
+
+inline int64_t RuleNaive(int year, const TzRule& r) {
+    const int day = NthWeekdayOfMonth(year, r.month, r.dow, r.week);
+    if (day <= 0) return INT64_MAX;
+    return DaysFromCivil(year, r.month, day) * 86400 + r.secs;
+}
+
+inline int OffsetAtNaive(const Tz& tz, int64_t naive) {
+    if (!tz.hasDst || !tz.dstStart.valid || !tz.dstEnd.valid) return tz.stdOffset;
+    int y;
+    unsigned m, d;
+    CivilFromDays(FloorDiv(naive, 86400), y, m, d);
+    const int64_t start = RuleNaive(y, tz.dstStart);
+    const int64_t end = RuleNaive(y, tz.dstEnd);
+    bool dst;
+    if (start < end) dst = naive >= start && naive < end;       // northern hemisphere
+    else             dst = naive >= start || naive < end;       // southern hemisphere
+    return dst ? tz.dstOffset : tz.stdOffset;
+}
+
+struct TzRef {
+    enum Kind { Utc, Rules, System } kind = System;
+    const Tz* tz = nullptr;
+};
+
+inline int64_t ToUtc(const TzRef& ref, int64_t naive) {
+    switch (ref.kind) {
+        case TzRef::Utc: return naive;
+        case TzRef::Rules: return naive - OffsetAtNaive(*ref.tz, naive);
+        default: return SystemLocalToUtc(naive);
+    }
+}
+
+// ---- line-level parsing -------------------------------------------------------
+struct Prop {
+    std::string name;
+    std::vector<std::pair<std::string, std::string>> params;
+    std::string value;
+    std::string Param(const char* key) const {
+        for (const auto& p : params) if (p.first == key) return p.second;
+        return std::string();
+    }
+};
+
+inline std::string Upper(std::string s) {
+    for (char& c : s) if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 32);
+    return s;
+}
+
+inline bool ParseProp(const std::string& line, Prop& out) {
+    out = Prop();
+    bool inQuote = false;
+    size_t colon = std::string::npos;
+    for (size_t i = 0; i < line.size(); ++i) {
+        if (line[i] == '"') inQuote = !inQuote;
+        else if (line[i] == ':' && !inQuote) { colon = i; break; }
+    }
+    if (colon == std::string::npos) return false;
+    out.value = line.substr(colon + 1);
+
+    std::vector<std::string> parts;
+    std::string cur;
+    inQuote = false;
+    for (size_t i = 0; i < colon; ++i) {
+        const char c = line[i];
+        if (c == '"') { inQuote = !inQuote; cur.push_back(c); }
+        else if (c == ';' && !inQuote) { parts.push_back(cur); cur.clear(); }
+        else cur.push_back(c);
+    }
+    parts.push_back(cur);
+    out.name = Upper(parts[0]);
+    for (size_t i = 1; i < parts.size(); ++i) {
+        const size_t eq = parts[i].find('=');
+        if (eq == std::string::npos) continue;
+        std::string v = parts[i].substr(eq + 1);
+        if (v.size() >= 2 && v.front() == '"' && v.back() == '"') v = v.substr(1, v.size() - 2);
+        out.params.emplace_back(Upper(parts[i].substr(0, eq)), v);
+    }
+    return true;
+}
+
+inline std::string Unescape(const std::string& s) {
+    std::string r;
+    r.reserve(s.size());
+    for (size_t i = 0; i < s.size(); ++i) {
+        if (s[i] == '\\' && i + 1 < s.size()) {
+            const char n = s[i + 1];
+            if (n == 'n' || n == 'N') r.push_back(' ');
+            else r.push_back(n);
+            ++i;
+        } else {
+            r.push_back(s[i]);
+        }
+    }
+    return r;
+}
+
+inline std::vector<std::string> Split(const std::string& s, char sep) {
+    std::vector<std::string> v;
+    std::string cur;
+    for (char c : s) {
+        if (c == sep) { v.push_back(cur); cur.clear(); }
+        else cur.push_back(c);
+    }
+    v.push_back(cur);
+    return v;
+}
+
+inline int ParseOffset(const std::string& s) {  // +0200 / -0530 / +020000
+    if (s.size() < 5) return 0;
+    const int sign = s[0] == '-' ? -1 : 1;
+    int hh = 0, mm = 0, ss = 0;
+    ParseDigits(s, 1, 2, hh);
+    ParseDigits(s, 3, 2, mm);
+    if (s.size() >= 7) ParseDigits(s, 5, 2, ss);
+    return sign * (hh * 3600 + mm * 60 + ss);
+}
+
+inline int WeekdayFromCode(const std::string& c) {
+    static const char* kCodes[] = {"SU", "MO", "TU", "WE", "TH", "FR", "SA"};
+    for (int i = 0; i < 7; ++i) if (c == kCodes[i]) return i;
+    return -1;
+}
+
+struct ByDay { int ordinal = 0; int dow = 0; };
+
+struct RRule {
+    bool valid = false;
+    std::string freq;
+    int interval = 1;
+    int count = 0;  // 0 = unlimited
+    TimeVal until;
+    std::vector<ByDay> byDay;
+    std::vector<int> byMonthDay;
+    std::vector<int> byMonth;
+    int wkst = 1;   // Monday
+};
+
+inline RRule ParseRRule(const std::string& value) {
+    RRule r;
+    for (const std::string& kv : Split(value, ';')) {
+        const size_t eq = kv.find('=');
+        if (eq == std::string::npos) continue;
+        const std::string k = Upper(kv.substr(0, eq));
+        const std::string v = kv.substr(eq + 1);
+        if (k == "FREQ") r.freq = Upper(v);
+        else if (k == "INTERVAL") r.interval = std::max(1, atoi(v.c_str()));
+        else if (k == "COUNT") r.count = std::max(0, atoi(v.c_str()));
+        else if (k == "UNTIL") r.until = ParseTime(v);
+        else if (k == "WKST") { const int w = WeekdayFromCode(Upper(v)); if (w >= 0) r.wkst = w; }
+        else if (k == "BYMONTH") for (const auto& x : Split(v, ',')) r.byMonth.push_back(atoi(x.c_str()));
+        else if (k == "BYMONTHDAY") for (const auto& x : Split(v, ',')) r.byMonthDay.push_back(atoi(x.c_str()));
+        else if (k == "BYDAY") {
+            for (const auto& x : Split(v, ',')) {
+                if (x.size() < 2) continue;
+                ByDay b;
+                const std::string code = Upper(x.substr(x.size() - 2));
+                b.dow = WeekdayFromCode(code);
+                if (b.dow < 0) continue;
+                const std::string ord = x.substr(0, x.size() - 2);
+                b.ordinal = ord.empty() ? 0 : atoi(ord.c_str());
+                r.byDay.push_back(b);
+            }
+        }
+    }
+    r.valid = !r.freq.empty();
+    return r;
+}
+
+inline TzRule RuleFromRRule(const RRule& rr, int secsOfDay) {
+    TzRule t;
+    if (rr.byMonth.empty() || rr.byDay.empty()) return t;
+    t.month = rr.byMonth[0];
+    t.week = rr.byDay[0].ordinal != 0 ? rr.byDay[0].ordinal : 1;
+    t.dow = rr.byDay[0].dow;
+    t.secs = secsOfDay;
+    t.valid = true;
+    return t;
+}
+
+// ---- events -------------------------------------------------------------------
+struct Event {
+    int64_t startUtc = 0;
+    int64_t endUtc = 0;
+    bool allDay = false;
+    std::string title;  // UTF-8
+};
+
+struct RawEvent {
+    std::string uid;
+    std::string summary;
+    TimeVal start, end, recurrenceId;
+    std::string startTzid, endTzid, recurTzid;
+    bool hasEnd = false;
+    int64_t durationSecs = -1;
+    std::string rrule;
+    std::vector<std::pair<TimeVal, std::string>> exdates;  // value + TZID
+    bool cancelled = false;
+};
+
+inline int64_t ParseDuration(const std::string& s) {  // P1DT2H30M, PT45M, P1W
+    if (s.empty()) return -1;
+    size_t i = 0;
+    int sign = 1;
+    if (s[i] == '-') { sign = -1; ++i; } else if (s[i] == '+') ++i;
+    if (i >= s.size() || s[i] != 'P') return -1;
+    ++i;
+    bool inTime = false;
+    int64_t total = 0;
+    int64_t num = 0;
+    bool haveNum = false;
+    for (; i < s.size(); ++i) {
+        const char c = s[i];
+        if (c == 'T') { inTime = true; continue; }
+        if (c >= '0' && c <= '9') { num = num * 10 + (c - '0'); haveNum = true; continue; }
+        if (!haveNum) return -1;
+        if (c == 'W') total += num * 7 * 86400;
+        else if (c == 'D') total += num * 86400;
+        else if (c == 'H' && inTime) total += num * 3600;
+        else if (c == 'M' && inTime) total += num * 60;
+        else if (c == 'S' && inTime) total += num;
+        num = 0;
+        haveNum = false;
+    }
+    return sign * total;
+}
+
+inline std::string Unfold(const std::string& text, std::vector<std::string>& lines) {
+    std::string cur;
+    bool have = false;
+    size_t i = 0;
+    while (i < text.size()) {
+        size_t e = text.find('\n', i);
+        if (e == std::string::npos) e = text.size();
+        size_t len = e - i;
+        if (len > 0 && text[i + len - 1] == '\r') --len;
+        if (len > 0 && (text[i] == ' ' || text[i] == '\t') && have) {
+            cur.append(text, i + 1, len - 1);
+        } else {
+            if (have) lines.push_back(cur);
+            cur.assign(text, i, len);
+            have = true;
+        }
+        i = e + 1;
+    }
+    if (have) lines.push_back(cur);
+    return std::string();
+}
+
+class Calendar {
+public:
+    // Parses a whole .ics file; occurrences overlapping [winStartUtc, winEndUtc)
+    // are appended to `out`.
+    void Parse(const std::string& text, int64_t winStartUtc, int64_t winEndUtc, std::vector<Event>& out) {
+        std::vector<std::string> lines;
+        Unfold(text, lines);
+
+        std::map<std::string, Tz> zones;
+        std::vector<RawEvent> events;
+
+        std::string tzid;
+        Tz curTz;
+        bool inTz = false, inSub = false, subIsDaylight = false;
+        int subOffsetTo = 0, subSecs = 0;
+        RRule subRule;
+        bool inEvent = false;
+        RawEvent ev;
+
+        for (const std::string& line : lines) {
+            Prop p;
+            if (!ParseProp(line, p)) continue;
+
+            if (p.name == "BEGIN") {
+                const std::string v = Upper(p.value);
+                if (v == "VTIMEZONE") { inTz = true; tzid.clear(); curTz = Tz(); }
+                else if (v == "DAYLIGHT" || v == "STANDARD") {
+                    if (inTz) { inSub = true; subIsDaylight = v == "DAYLIGHT"; subOffsetTo = 0; subSecs = 0; subRule = RRule(); }
+                } else if (v == "VEVENT") { inEvent = true; ev = RawEvent(); }
+                continue;
+            }
+            if (p.name == "END") {
+                const std::string v = Upper(p.value);
+                if (v == "VTIMEZONE") {
+                    if (inTz && !tzid.empty()) { curTz.hasRules = true; zones[tzid] = curTz; }
+                    inTz = false;
+                } else if (v == "DAYLIGHT" || v == "STANDARD") {
+                    if (inTz && inSub) {
+                        const TzRule rule = RuleFromRRule(subRule, subSecs);
+                        if (subIsDaylight) {
+                            curTz.dstOffset = subOffsetTo;
+                            if (rule.valid) { curTz.dstStart = rule; curTz.hasDst = true; }
+                        } else {
+                            curTz.stdOffset = subOffsetTo;
+                            if (rule.valid) curTz.dstEnd = rule;
+                        }
+                    }
+                    inSub = false;
+                } else if (v == "VEVENT") {
+                    if (inEvent && ev.start.ok && !ev.cancelled) events.push_back(ev);
+                    inEvent = false;
+                }
+                continue;
+            }
+
+            if (inTz && !inSub) {
+                if (p.name == "TZID") tzid = p.value;
+            } else if (inTz && inSub) {
+                if (p.name == "TZOFFSETTO") subOffsetTo = ParseOffset(p.value);
+                else if (p.name == "DTSTART") { const TimeVal t = ParseTime(p.value); if (t.ok) subSecs = static_cast<int>(((t.naive % 86400) + 86400) % 86400); }
+                else if (p.name == "RRULE") subRule = ParseRRule(p.value);
+            } else if (inEvent) {
+                if (p.name == "UID") ev.uid = p.value;
+                else if (p.name == "SUMMARY") ev.summary = Unescape(p.value);
+                else if (p.name == "DTSTART") { ev.start = ParseTime(p.value); ev.startTzid = p.Param("TZID"); }
+                else if (p.name == "DTEND") { ev.end = ParseTime(p.value); ev.endTzid = p.Param("TZID"); ev.hasEnd = ev.end.ok; }
+                else if (p.name == "DURATION") ev.durationSecs = ParseDuration(p.value);
+                else if (p.name == "RRULE") ev.rrule = p.value;
+                else if (p.name == "RECURRENCE-ID") { ev.recurrenceId = ParseTime(p.value); ev.recurTzid = p.Param("TZID"); }
+                else if (p.name == "STATUS") ev.cancelled = Upper(p.value) == "CANCELLED";
+                else if (p.name == "EXDATE") {
+                    const std::string z = p.Param("TZID");
+                    for (const auto& x : Split(p.value, ',')) {
+                        const TimeVal t = ParseTime(x);
+                        if (t.ok) ev.exdates.emplace_back(t, z);
+                    }
+                }
+            }
+        }
+
+        // Pass 1: which recurrence instances were moved or deleted individually?
+        std::set<std::pair<std::string, int64_t>> overridden;
+        for (const RawEvent& e : events) {
+            if (!e.recurrenceId.ok) continue;
+            const TzRef ref = Resolve(e.recurrenceId.utc, e.recurTzid.empty() ? e.startTzid : e.recurTzid, zones);
+            overridden.insert({e.uid, ToUtc(ref, e.recurrenceId.naive)});
+        }
+
+        // Pass 2: emit.
+        const int64_t naiveHi = winEndUtc + 2 * 86400;
+        for (const RawEvent& e : events) {
+            const TzRef ref = Resolve(e.start.utc, e.startTzid, zones);
+            const TzRef endRef = e.hasEnd ? Resolve(e.end.utc, e.endTzid, zones) : ref;
+            const bool allDay = e.start.dateOnly;
+
+            int64_t lenNaive;  // in the start's wall clock
+            if (e.hasEnd && endRef.kind == ref.kind && endRef.tz == ref.tz) {
+                lenNaive = e.end.naive - e.start.naive;
+            } else if (e.hasEnd) {
+                lenNaive = ToUtc(endRef, e.end.naive) - ToUtc(ref, e.start.naive);
+            } else if (e.durationSecs >= 0) {
+                lenNaive = e.durationSecs;
+            } else {
+                lenNaive = allDay ? 86400 : 0;
+            }
+            if (lenNaive < 0) lenNaive = 0;
+
+            auto emit = [&](int64_t startNaive) {
+                const int64_t s = ToUtc(ref, startNaive);
+                int64_t en = ToUtc(ref, startNaive + lenNaive);
+                if (en < s) en = s;
+                if (en <= winStartUtc && !(s == en && s >= winStartUtc)) return;
+                if (s >= winEndUtc) return;
+                Event o;
+                o.startUtc = s;
+                o.endUtc = en;
+                o.allDay = allDay;
+                o.title = e.summary.empty() ? std::string("(no title)") : e.summary;
+                out.push_back(std::move(o));
+            };
+
+            const RRule rr = e.rrule.empty() ? RRule() : ParseRRule(e.rrule);
+            if (!rr.valid || e.recurrenceId.ok) {
+                emit(e.start.naive);
+                continue;
+            }
+
+            std::set<int64_t> exUtc;
+            for (const auto& ex : e.exdates) {
+                const TzRef xr = Resolve(ex.first.utc, ex.second.empty() ? e.startTzid : ex.second, zones);
+                if (ex.first.dateOnly) exUtc.insert(ToUtc(ref, ex.first.naive));
+                else exUtc.insert(ToUtc(xr, ex.first.naive));
+            }
+            int64_t untilUtc = INT64_MAX;
+            if (rr.until.ok) {
+                if (rr.until.utc) untilUtc = rr.until.naive;
+                else untilUtc = ToUtc(ref, rr.until.naive + (rr.until.dateOnly ? 86399 : 0));
+            }
+
+            Expand(e, rr, naiveHi, [&](int64_t startNaive) {
+                const int64_t s = ToUtc(ref, startNaive);
+                if (s > untilUtc) return;
+                if (exUtc.count(s)) return;
+                if (overridden.count({e.uid, s})) return;
+                emit(startNaive);
+            });
+        }
+    }
+
+private:
+    static TzRef Resolve(bool utc, const std::string& tzid, const std::map<std::string, Tz>& zones) {
+        TzRef r;
+        if (utc) { r.kind = TzRef::Utc; return r; }
+        if (!tzid.empty()) {
+            const auto it = zones.find(tzid);
+            if (it != zones.end()) { r.kind = TzRef::Rules; r.tz = &it->second; return r; }
+            if (tzid == "UTC" || tzid == "GMT" || tzid == "Etc/UTC") { r.kind = TzRef::Utc; return r; }
+        }
+        r.kind = TzRef::System;
+        return r;
+    }
+
+    template <typename F>
+    static void Expand(const RawEvent& e, const RRule& rr, int64_t naiveHi, F&& visit) {
+        const int64_t startDay = FloorDiv(e.start.naive, 86400);
+        const int secsOfDay = static_cast<int>(e.start.naive - startDay * 86400);
+        int sy; unsigned sm, sd;
+        CivilFromDays(startDay, sy, sm, sd);
+        const int64_t endDay = FloorDiv(naiveHi, 86400) + 1;
+
+        int produced = 0;
+        bool stop = false;
+        auto emitDay = [&](int64_t day) {
+            if (stop || day < startDay) return;
+            ++produced;
+            if (rr.count > 0 && produced > rr.count) { stop = true; return; }
+            visit(day * 86400 + secsOfDay);
+        };
+        auto monthFilter = [&](int month) {
+            if (rr.byMonth.empty()) return true;
+            for (int m : rr.byMonth) if (m == month) return true;
+            return false;
+        };
+        auto weekdayAllowed = [&](int dow) {
+            if (rr.byDay.empty()) return true;
+            for (const auto& b : rr.byDay) if (b.dow == dow) return true;
+            return false;
+        };
+        // All days in (y, m) selected by BYMONTHDAY / BYDAY; falls back to `dflt`.
+        auto monthDays = [&](int y, int m, int dflt) {
+            std::vector<int> days;
+            const int dim = DaysInMonth(y, m);
+            if (!rr.byMonthDay.empty()) {
+                for (int md : rr.byMonthDay) {
+                    const int d = md > 0 ? md : dim + md + 1;
+                    if (d >= 1 && d <= dim) days.push_back(d);
+                }
+            } else if (!rr.byDay.empty()) {
+                for (const auto& b : rr.byDay) {
+                    if (b.ordinal != 0) {
+                        const int d = NthWeekdayOfMonth(y, m, b.dow, b.ordinal);
+                        if (d > 0) days.push_back(d);
+                    } else {
+                        for (int d = 1; d <= dim; ++d)
+                            if (DayOfWeek(DaysFromCivil(y, m, d)) == b.dow) days.push_back(d);
+                    }
+                }
+            } else if (dflt <= dim) {
+                days.push_back(dflt);
+            }
+            std::sort(days.begin(), days.end());
+            days.erase(std::unique(days.begin(), days.end()), days.end());
+            return days;
+        };
+
+        const int kMaxIter = 200000;
+        if (rr.freq == "DAILY") {
+            for (int64_t k = 0; k < kMaxIter && !stop; ++k) {
+                const int64_t day = startDay + k * rr.interval;
+                if (day > endDay) break;
+                int y; unsigned m, d;
+                CivilFromDays(day, y, m, d);
+                if (!monthFilter(static_cast<int>(m))) continue;
+                if (!weekdayAllowed(DayOfWeek(day))) continue;
+                if (!rr.byMonthDay.empty()) {
+                    bool ok = false;
+                    const int dim = DaysInMonth(y, m);
+                    for (int md : rr.byMonthDay) if ((md > 0 ? md : dim + md + 1) == static_cast<int>(d)) ok = true;
+                    if (!ok) continue;
+                }
+                emitDay(day);
+            }
+        } else if (rr.freq == "WEEKLY") {
+            const int startDow = DayOfWeek(startDay);
+            const int64_t week0 = startDay - ((startDow - rr.wkst + 7) % 7);
+            std::vector<int> dows;
+            if (rr.byDay.empty()) dows.push_back(startDow);
+            else for (const auto& b : rr.byDay) dows.push_back(b.dow);
+            std::vector<int> offs;
+            for (int dw : dows) offs.push_back((dw - rr.wkst + 7) % 7);
+            std::sort(offs.begin(), offs.end());
+            offs.erase(std::unique(offs.begin(), offs.end()), offs.end());
+            for (int64_t k = 0; k < kMaxIter && !stop; ++k) {
+                const int64_t base = week0 + k * 7 * rr.interval;
+                if (base > endDay) break;
+                for (int off : offs) {
+                    const int64_t day = base + off;
+                    int y; unsigned m, d;
+                    CivilFromDays(day, y, m, d);
+                    if (!monthFilter(static_cast<int>(m))) continue;
+                    emitDay(day);
+                }
+            }
+        } else if (rr.freq == "MONTHLY") {
+            for (int64_t k = 0; k < kMaxIter && !stop; ++k) {
+                const int64_t mi = static_cast<int64_t>(sy) * 12 + (sm - 1) + k * rr.interval;
+                const int y = static_cast<int>(FloorDiv(mi, 12));
+                const int m = static_cast<int>(mi - static_cast<int64_t>(y) * 12) + 1;
+                if (DaysFromCivil(y, m, 1) > endDay) break;
+                if (!monthFilter(m)) continue;
+                for (int d : monthDays(y, m, static_cast<int>(sd))) emitDay(DaysFromCivil(y, m, d));
+            }
+        } else if (rr.freq == "YEARLY") {
+            for (int64_t k = 0; k < 5000 && !stop; ++k) {
+                const int y = sy + static_cast<int>(k * rr.interval);
+                if (DaysFromCivil(y, 1, 1) > endDay) break;
+                std::vector<int> months = rr.byMonth;
+                if (months.empty()) months.push_back(static_cast<int>(sm));
+                std::sort(months.begin(), months.end());
+                const bool selectorsPresent = !rr.byMonthDay.empty() || !rr.byDay.empty();
+                for (int m : months) {
+                    if (m < 1 || m > 12) continue;
+                    if (selectorsPresent) {
+                        for (int d : monthDays(y, m, static_cast<int>(sd))) emitDay(DaysFromCivil(y, m, d));
+                    } else if (static_cast<int>(sd) <= DaysInMonth(y, m)) {
+                        emitDay(DaysFromCivil(y, m, static_cast<int>(sd)));
+                    }
+                }
+            }
+        } else {
+            visit(e.start.naive);  // unsupported FREQ: show the first instance only
+        }
+    }
+};
+
+// ---- appointment selection and labels (template: works on any event type) --------
+constexpr int64_t kNowGraceSecs = 5 * 60;  // "now" stays up this long after the start
+
+// Index of the next timed event that starts before `endOfDayUtc`, or -1.
+template <typename Ev>
+inline int FindNextToday(const std::vector<Ev>& events, int64_t nowUtc, int64_t endOfDayUtc) {
+    int best = -1;
+    for (size_t i = 0; i < events.size(); ++i) {
+        const Ev& e = events[i];
+        if (e.allDay) continue;
+        if (e.startUtc < nowUtc - kNowGraceSecs) continue;
+        if (e.startUtc >= endOfDayUtc) continue;
+        if (best < 0 || e.startUtc < events[best].startUtc) best = static_cast<int>(i);
+    }
+    return best;
+}
+
+// Collapsed-island label. Empty = nothing to show (more than 5 h away).
+inline const char* BucketLabel(int64_t secsUntil) {
+    if (secsUntil <= 0) return "now";
+    static const struct { int64_t limit; const char* text; } kBuckets[] = {
+        {60, "<1m"},    {120, "<2m"},   {180, "<3m"},   {240, "<4m"},
+        {300, "<5m"},   {600, "<10m"},  {900, "<15m"},  {1800, "<30m"},
+        {2700, "<45m"}, {3600, "<1h"},  {7200, "<2h"},  {10800, "<3h"},
+        {14400, "<4h"}, {18000, "<5h"},
+    };
+    for (const auto& b : kBuckets) if (secsUntil < b.limit) return b.text;
+    return "";
+}
+
+// Start-page line: "now", "in 25m", "in 2h 15m".
+inline std::string RelativeText(int64_t secsUntil) {
+    if (secsUntil <= 0) return "now";
+    const int64_t mins = (secsUntil + 59) / 60;  // round up: 61 s -> 2 m
+    if (mins < 60) return "in " + std::to_string(mins) + "m";
+    const int64_t h = mins / 60, m = mins % 60;
+    return "in " + std::to_string(h) + "h" + (m ? " " + std::to_string(m) + "m" : std::string());
+}
+
+}  // namespace ics
+// ==ICS-ENGINE-END==
+
+// -- Appointments: Windows glue -------------------------------------------------
+SYSTEMTIME ApptNaiveToSystemTime(int64_t naive) {
+    int y;
+    unsigned m, d;
+    const int64_t days = ics::FloorDiv(naive, 86400);
+    ics::CivilFromDays(days, y, m, d);
+    const int64_t sod = naive - days * 86400;
+    SYSTEMTIME st = {};
+    st.wYear = static_cast<WORD>(y);
+    st.wMonth = static_cast<WORD>(m);
+    st.wDay = static_cast<WORD>(d);
+    st.wHour = static_cast<WORD>(sod / 3600);
+    st.wMinute = static_cast<WORD>((sod % 3600) / 60);
+    st.wSecond = static_cast<WORD>(sod % 60);
+    return st;
+}
+
+int64_t ApptSystemTimeToNaive(const SYSTEMTIME& st) {
+    return ics::DaysFromCivil(st.wYear, st.wMonth, st.wDay) * 86400 +
+           st.wHour * 3600 + st.wMinute * 60 + st.wSecond;
+}
+
+int64_t SystemLocalToUtc(int64_t naiveLocal) {
+    const SYSTEMTIME lt = ApptNaiveToSystemTime(naiveLocal);
+    SYSTEMTIME ut = {};
+    if (!TzSpecificLocalTimeToSystemTime(nullptr, &lt, &ut)) {
+        return naiveLocal;
+    }
+    return ApptSystemTimeToNaive(ut);
+}
+
+int64_t SystemUtcToLocalNaive(int64_t utc) {
+    const SYSTEMTIME ut = ApptNaiveToSystemTime(utc);
+    SYSTEMTIME lt = {};
+    if (!SystemTimeToTzSpecificLocalTime(nullptr, &ut, &lt)) {
+        return utc;
+    }
+    return ApptSystemTimeToNaive(lt);
+}
+
+int64_t ApptNowUtc() {
+    FILETIME ft;
+    GetSystemTimeAsFileTime(&ft);
+    ULARGE_INTEGER u;
+    u.LowPart = ft.dwLowDateTime;
+    u.HighPart = ft.dwHighDateTime;
+    return static_cast<int64_t>(u.QuadPart / 10000000ULL) - 11644473600LL;
+}
+
+std::wstring ApptUtf8ToWide(const std::string& text) {
+    if (text.empty()) return std::wstring();
+    const int n = MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), nullptr, 0);
+    if (n <= 0) return std::wstring();
+    std::wstring out(static_cast<size_t>(n), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), out.data(), n);
+    return out;
+}
+
+// What the collapsed strip and the start page need to know about "the next one".
+struct AppointmentInfo {
+    bool valid = false;
+    int64_t secsUntil = 0;  // <= 0 while inside the "now" grace period
+    int64_t startUtc = 0;
+    std::wstring title;
+    uint32_t color = 0x4285F4;
+};
+
+// Next timed appointment that starts later today (all-day events are skipped).
+bool GetNextAppointment(const SharedState& state, const Settings& settings, AppointmentInfo& out) {
+    out = AppointmentInfo();
+    if (!settings.appointments || !state.calendar.events) {
+        return false;
+    }
+    const int64_t nowUtc = ApptNowUtc();
+    const int64_t localNow = SystemUtcToLocalNaive(nowUtc);
+    const int64_t endOfDayUtc = SystemLocalToUtc((ics::FloorDiv(localNow, 86400) + 1) * 86400);
+    const std::vector<CalEvent>& events = *state.calendar.events;
+    const int idx = ics::FindNextToday(events, nowUtc, endOfDayUtc);
+    if (idx < 0) {
+        return false;
+    }
+    const CalEvent& e = events[static_cast<size_t>(idx)];
+    out.valid = true;
+    out.startUtc = e.startUtc;
+    out.secsUntil = e.startUtc - nowUtc;
+    out.title = e.title;
+    out.color = e.color;
+    return true;
+}
+
+// -- Appointments: feed thread -----------------------------------------------------
+struct CalSource {
+    std::wstring name;
+    std::wstring url;
+    uint32_t color = 0x4285F4;
+};
+
+std::wstring ApptTrim(const std::wstring& s) {
+    size_t a = 0, b = s.size();
+    while (a < b && iswspace(s[a])) ++a;
+    while (b > a && iswspace(s[b - 1])) --b;
+    return s.substr(a, b - a);
+}
+
+bool ApptParseHexColor(const std::wstring& text, uint32_t& out) {
+    std::wstring t = text;
+    if (!t.empty() && t[0] == L'#') t.erase(0, 1);
+    if (t.size() != 6) return false;
+    uint32_t v = 0;
+    for (wchar_t c : t) {
+        v <<= 4;
+        if (c >= L'0' && c <= L'9') v |= static_cast<uint32_t>(c - L'0');
+        else if (c >= L'a' && c <= L'f') v |= static_cast<uint32_t>(c - L'a' + 10);
+        else if (c >= L'A' && c <= L'F') v |= static_cast<uint32_t>(c - L'A' + 10);
+        else return false;
+    }
+    out = v;
+    return true;
+}
+
+// "Name|#RRGGBB|URL", "Name|URL" or just "URL".
+std::vector<CalSource> ParseCalendarSources(const std::vector<std::wstring>& entries) {
+    static const uint32_t kPalette[] = {0x4285F4, 0x0F9D58, 0xF4B400, 0xDB4437,
+                                        0xAB47BC, 0x00ACC1, 0xFF7043, 0x9E9D24};
+    std::vector<CalSource> result;
+    for (const std::wstring& raw : entries) {
+        std::vector<std::wstring> parts;
+        size_t pos = 0;
+        while (parts.size() < 2) {
+            const size_t bar = raw.find(L'|', pos);
+            if (bar == std::wstring::npos) break;
+            parts.push_back(raw.substr(pos, bar - pos));
+            pos = bar + 1;
+        }
+        parts.push_back(raw.substr(pos));  // the rest is the URL
+
+        CalSource src;
+        src.color = kPalette[result.size() % (sizeof(kPalette) / sizeof(kPalette[0]))];
+        src.url = ApptTrim(parts.back());
+        if (parts.size() >= 2) src.name = ApptTrim(parts[0]);
+        if (parts.size() >= 3) {
+            uint32_t c;
+            if (ApptParseHexColor(ApptTrim(parts[1]), c)) src.color = c;
+        }
+        if (src.url.empty()) continue;
+        if (src.name.empty()) src.name = L"Calendar " + std::to_wstring(result.size() + 1);
+        result.push_back(std::move(src));
+    }
+    return result;
+}
+
+// https only. webcal:// is the same thing under another name.
+bool ApptSplitUrl(std::wstring url, std::wstring& host, std::wstring& path) {
+    if (url.size() > 9 && _wcsnicmp(url.c_str(), L"webcal://", 9) == 0) {
+        url = L"https://" + url.substr(9);
+    }
+    if (url.size() <= 8 || _wcsnicmp(url.c_str(), L"https://", 8) != 0) return false;
+    const std::wstring rest = url.substr(8);
+    const size_t slash = rest.find(L'/');
+    host = slash == std::wstring::npos ? rest : rest.substr(0, slash);
+    path = slash == std::wstring::npos ? L"/" : rest.substr(slash);
+    return !host.empty() && host.find(L'@') == std::wstring::npos && host.find(L':') == std::wstring::npos;
+}
+
+DWORD WINAPI CalendarThreadProc(void*) {
+    // Let startup settle first, like the weather thread.
+    WaitForSingleObject(g_stopEvent, 4000);
+
+    static const DWORD kBackoffMs[] = {60 * 1000, 2 * 60 * 1000, 5 * 60 * 1000};
+    size_t backoff = 0;
+    // url -> last good events. A feed that fails keeps showing its old data.
+    std::map<std::wstring, std::vector<CalEvent>> cache;
+    bool published = false;
+
+    while (WaitForSingleObject(g_stopEvent, 0) == WAIT_TIMEOUT) {
+        bool enabled = false;
+        std::vector<std::wstring> entries;
+        {
+            std::lock_guard lock(g_settingsMutex);
+            enabled = g_settings.appointments;
+            entries = g_settings.appointmentCalendars;
+        }
+
+        DWORD waitMs = 5000;
+        if (!enabled) {
+            if (published) {
+                std::lock_guard lock(g_stateMutex);
+                g_state.calendar = CalendarSnapshot();
+                published = false;
+                g_layoutDirty = true;
+            }
+            cache.clear();
+        } else {
+            const std::vector<CalSource> sources = ParseCalendarSources(entries);
+            bool anyFailed = false;
+
+            std::set<std::wstring> wanted;
+            for (const CalSource& src : sources) wanted.insert(src.url);
+            for (auto it = cache.begin(); it != cache.end();) {
+                it = wanted.count(it->first) ? std::next(it) : cache.erase(it);
+            }
+
+            const int64_t nowUtc = ApptNowUtc();
+            for (const CalSource& src : sources) {
+                if (WaitForSingleObject(g_stopEvent, 0) != WAIT_TIMEOUT) break;
+                std::wstring host, path;
+                if (!ApptSplitUrl(src.url, host, path)) {
+                    // Never log the URL itself: the secret is part of it.
+                    Wh_Log(L"Appointments: \"%s\" is not an https:// or webcal:// address.", src.name.c_str());
+                    continue;
+                }
+                const HttpResult res = HttpGetEx(host.c_str(), path.c_str(), true, L"DynamicIsland/1.0");
+                if (!res.ok || res.status != 200 || res.body.find("BEGIN:VCALENDAR") == std::string::npos) {
+                    Wh_Log(L"Appointments: fetching \"%s\" failed (ok=%d, HTTP %lu).", src.name.c_str(),
+                           res.ok ? 1 : 0, res.status);
+                    anyFailed = true;
+                    continue;
+                }
+
+                std::vector<ics::Event> parsed;
+                ics::Calendar cal;
+                cal.Parse(res.body, nowUtc - 86400, nowUtc + 8 * 86400, parsed);
+                if (parsed.size() > 500) parsed.resize(500);
+
+                std::vector<CalEvent>& dst = cache[src.url];
+                dst.clear();
+                for (const ics::Event& pe : parsed) {
+                    CalEvent ce;
+                    ce.startUtc = pe.startUtc;
+                    ce.endUtc = pe.endUtc;
+                    ce.allDay = pe.allDay;
+                    ce.title = ApptUtf8ToWide(pe.title);
+                    dst.push_back(std::move(ce));
+                }
+                Wh_Log(L"Appointments: \"%s\" -> %zu events in the next 8 days.", src.name.c_str(), dst.size());
+            }
+
+            auto merged = std::make_shared<std::vector<CalEvent>>();
+            for (const CalSource& src : sources) {
+                const auto it = cache.find(src.url);
+                if (it == cache.end()) continue;
+                for (CalEvent ce : it->second) {
+                    ce.color = src.color;
+                    merged->push_back(std::move(ce));
+                }
+            }
+            std::stable_sort(merged->begin(), merged->end(),
+                             [](const CalEvent& a, const CalEvent& b) { return a.startUtc < b.startUtc; });
+            {
+                std::lock_guard lock(g_stateMutex);
+                g_state.calendar.events = merged;
+                g_state.calendar.hasData = true;
+                published = true;
+                g_layoutDirty = true;
+            }
+
+            if (sources.empty()) {
+                waitMs = 30 * 1000;
+            } else if (anyFailed) {
+                waitMs = kBackoffMs[backoff];
+                if (backoff + 1 < ARRAYSIZE(kBackoffMs)) ++backoff;
+            } else {
+                backoff = 0;
+                waitMs = 10 * 60 * 1000;
+            }
+        }
+
+        HANDLE waits[2] = {g_stopEvent, g_calendarRefreshEvent};
+        const DWORD r = WaitForMultipleObjects(g_calendarRefreshEvent ? 2 : 1, waits, FALSE, waitMs);
+        if (r == WAIT_OBJECT_0) break;
+        if (r == WAIT_OBJECT_0 + 1) backoff = 0;  // settings changed: refetch right away
     }
     return 0;
 }
@@ -12896,7 +13945,10 @@ struct MarqueeLayoutCache {
 struct IdleStripMetrics {
     float clockWidth = 0.0f;
     float weatherWidth = 0.0f;
+    float apptWidth = 0.0f;
+    std::wstring apptLabel;  // calendar icon + countdown bucket
     bool hasWeather = false;
+    bool hasAppt = false;
     bool hasPrivacy = false;
     float totalWidth = IdleStripLayout::kMinWidth;
 };
@@ -13297,6 +14349,21 @@ class Renderer {
                 MeasureTextWidthCached(WidestDigitForm(label), fmt, idleWeatherWidthCache_);
         }
 
+        // Next appointment today: only inside the last 5 hours, as a calendar icon
+        // plus the countdown bucket. Further away it is simply not shown here.
+        {
+            AppointmentInfo appt;
+            if (GetNextAppointment(state, settings, appt)) {
+                const char* bucket = ics::BucketLabel(appt.secsUntil);
+                if (*bucket) {
+                    metrics.apptLabel = L"\U0001F4C5 " + ApptUtf8ToWide(bucket);
+                    metrics.hasAppt = true;
+                    metrics.apptWidth = MeasureTextWidthCached(WidestDigitForm(metrics.apptLabel), fmt,
+                                                               idleApptWidthCache_);
+                }
+            }
+        }
+
         metrics.hasPrivacy =
             (state.system.micActive && settings.privacyDots && settings.privacyDotsMic) ||
             (state.system.cameraActive && settings.privacyDots && settings.privacyDotsCam);
@@ -13305,6 +14372,9 @@ class Renderer {
         if (metrics.hasWeather) {
             total += IdleStripLayout::kSlotGap * 2.0f + IdleStripLayout::kDividerWidth +
                      metrics.weatherWidth;
+        }
+        if (metrics.hasAppt) {
+            total += IdleStripLayout::kSlotGap * 2.0f + IdleStripLayout::kDividerWidth + metrics.apptWidth;
         }
         if (metrics.hasPrivacy) {
             total += IdleStripLayout::kPrivacyReserve;
@@ -13356,6 +14426,7 @@ class Renderer {
     };
     TextWidthCache idleClockWidthCache_;
     TextWidthCache idleWeatherWidthCache_;
+    TextWidthCache idleApptWidthCache_;
 
     float MeasureTextWidthCached(const std::wstring& text, IDWriteTextFormat* fmt,
                                  TextWidthCache& cache) {
@@ -13459,6 +14530,7 @@ class Renderer {
         // width measured against the old ones is stale.
         idleClockWidthCache_.valid = false;
         idleWeatherWidthCache_.valid = false;
+        idleApptWidthCache_.valid = false;
 
         textFormat_ = nullptr;
         smallTextFormat_ = nullptr;
@@ -16282,11 +17354,261 @@ class Renderer {
         }
     }
 
+    // One line of text, vertically centred in `box`, trimmed with an ellipsis.
+    void DrawEllipsisText(const std::wstring& text, D2D1_RECT_F box, IDWriteTextFormat* fmt,
+                          ID2D1Brush* brush) {
+        if (text.empty() || !fmt || !brush || !dwriteFactory_) return;
+        const float w = box.right - box.left;
+        const float h = box.bottom - box.top;
+        if (w <= 1.0f || h <= 1.0f) return;
+        ComPtr<IDWriteTextLayout> layout;
+        if (FAILED(dwriteFactory_->CreateTextLayout(text.c_str(), static_cast<UINT32>(text.size()), fmt,
+                                                    w, h, &layout)) || !layout) {
+            return;
+        }
+        layout->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+        layout->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+        layout->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        ComPtr<IDWriteInlineObject> ellipsis;
+        if (SUCCEEDED(dwriteFactory_->CreateEllipsisTrimmingSign(layout.Get(), &ellipsis)) && ellipsis) {
+            const DWRITE_TRIMMING trimming = {DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0};
+            layout->SetTrimming(&trimming, ellipsis.Get());
+        }
+        target_->DrawTextLayout(D2D1::Point2F(box.left, box.top), layout.Get(), brush,
+                                D2D1_DRAW_TEXT_OPTIONS_NONE);
+    }
+
+    // Appointments tab: what is still ahead, grouped by day (today first). Events
+    // that already ended are left out; one that is running stays, its time in the
+    // accent colour. If the days do not fit, the last line says how many are left
+    // and a click on it shows the next page (and, at the end, jumps back to the top).
+    void DrawAppointmentsDashboard(const SharedState& state, D2D1_RECT_F rect,
+                                   const Settings& settings, float scale) {
+        if (!textBrush_ || !mutedBrush_ || !smallTextFormat_) return;
+        const float padX = FileTrayLayout::kPadX * scale;
+        g_apptMoreValid.store(false, std::memory_order_relaxed);
+
+        // Header.
+        const D2D1_RECT_F headerRect = D2D1::RectF(rect.left + padX, rect.top + 18.0f * scale,
+                                                   rect.right - padX, rect.top + 38.0f * scale);
+        if (boldTextFormat_) {
+            textBrush_->SetOpacity(0.96f);
+            boldTextFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+            const wchar_t* title = Loc(L"Appointments");
+            target_->DrawTextW(title, static_cast<UINT32>(wcslen(title)), boldTextFormat_.Get(),
+                               headerRect, textBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_NONE);
+            boldTextFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+        }
+
+        // Collect what is still ahead, one row per event, keyed by local day.
+        struct Row {
+            int64_t day;
+            const CalEvent* ev;
+        };
+        std::vector<Row> rows;
+        const int64_t nowUtc = ApptNowUtc();
+        const int64_t today = ics::FloorDiv(SystemUtcToLocalNaive(nowUtc), 86400);
+        if (settings.appointments && state.calendar.events) {
+            for (const CalEvent& e : *state.calendar.events) {
+                const bool over = e.endUtc > e.startUtc ? e.endUtc <= nowUtc
+                                                         : e.startUtc < nowUtc - ics::kNowGraceSecs;
+                if (over) continue;
+                const int64_t startDay = ics::FloorDiv(SystemUtcToLocalNaive(e.startUtc), 86400);
+                const int64_t day = std::max(startDay, today);  // running multi-day events count as today
+                if (day > today + 6) continue;
+                rows.push_back({day, &e});
+            }
+            std::stable_sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) {
+                if (a.day != b.day) return a.day < b.day;
+                if (a.ev->allDay != b.ev->allDay) return a.ev->allDay;  // all-day first
+                return a.ev->startUtc < b.ev->startUtc;
+            });
+        }
+
+        const float listTop = rect.top + FileTrayLayout::kListTop * scale;
+        const float listBottom = rect.bottom - FileTrayLayout::kListBottomInset * scale;
+
+        if (rows.empty()) {
+            g_apptPageStart.store(0, std::memory_order_relaxed);
+            const wchar_t* hint = Loc(L"No upcoming appointments");
+            mutedBrush_->SetOpacity(0.80f);
+            smallTextFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+            smallTextFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            target_->DrawTextW(hint, static_cast<UINT32>(wcslen(hint)), smallTextFormat_.Get(),
+                               D2D1::RectF(rect.left + padX, listTop, rect.right - padX, listBottom),
+                               mutedBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_NONE);
+            smallTextFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+            smallTextFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+            mutedBrush_->SetOpacity(0.75f);
+            return;
+        }
+
+        // The list may have shrunk since the page was chosen (an event ended).
+        size_t start = static_cast<size_t>(std::max(0, g_apptPageStart.load(std::memory_order_relaxed)));
+        if (start >= rows.size()) {
+            start = 0;
+            g_apptPageStart.store(0, std::memory_order_relaxed);
+        }
+
+        const float dayH = 15.0f * scale;
+        const float rowH = 19.0f * scale;
+        const float moreH = 16.0f * scale;
+        const float timeW = 58.0f * scale;
+
+        float y = listTop;
+        int64_t lastDay = INT64_MIN;
+        size_t end = start;  // one past the last row drawn
+        for (size_t i = start; i < rows.size(); ++i) {
+            const bool newDay = rows[i].day != lastDay;
+            const float need = (newDay ? dayH : 0.0f) + rowH;
+            // Leave room for the foot line unless this is the last row of a first page.
+            const bool footNeeded = (i + 1 < rows.size()) || start > 0;
+            const float limit = footNeeded ? listBottom - moreH : listBottom;
+            if (y + need > limit && i > start) break;
+
+            if (newDay) {
+                lastDay = rows[i].day;
+                wchar_t dateBuf[96] = {};
+                const SYSTEMTIME st = ApptNaiveToSystemTime(rows[i].day * 86400);
+                GetDateFormatEx(LOCALE_NAME_USER_DEFAULT, DATE_LONGDATE, &st, nullptr, dateBuf,
+                                ARRAYSIZE(dateBuf), nullptr);
+                std::wstring label;
+                if (rows[i].day == today) label = std::wstring(Loc(L"Today")) + L" \u00B7 ";
+                else if (rows[i].day == today + 1) label = std::wstring(Loc(L"Tomorrow")) + L" \u00B7 ";
+                label += dateBuf;
+                DrawEllipsisText(label, D2D1::RectF(rect.left + padX, y, rect.right - padX, y + dayH),
+                                 smallTextFormat_.Get(), mutedBrush_.Get());
+                y += dayH;
+            }
+
+            const CalEvent& e = *rows[i].ev;
+            const float rowTop = y;
+
+            // Calendar colour bar.
+            ComPtr<ID2D1SolidColorBrush> bar;
+            target_->CreateSolidColorBrush(D2D1::ColorF(e.color, 0.95f * settingsOpacity_), &bar);
+            if (bar) {
+                const float bw = 3.0f * scale;
+                target_->FillRoundedRectangle(
+                    D2D1::RoundedRect(D2D1::RectF(rect.left + padX, rowTop + 3.0f * scale,
+                                                  rect.left + padX + bw, rowTop + rowH - 3.0f * scale),
+                                      bw * 0.5f, bw * 0.5f), bar.Get());
+            }
+
+            const bool running = !e.allDay && e.startUtc <= nowUtc;
+            std::wstring when;
+            if (e.allDay) {
+                when = Loc(L"All day");
+            } else {
+                const SYSTEMTIME stLocal = ApptNaiveToSystemTime(SystemUtcToLocalNaive(e.startUtc));
+                when = FormatIslandTime(stLocal, settings.clockFollowSystem, settings.use24HourClock, false);
+            }
+            const float textLeft = rect.left + padX + 10.0f * scale;
+            ID2D1Brush* whenBrush = running && accentBrush_ ? static_cast<ID2D1Brush*>(accentBrush_.Get())
+                                                            : static_cast<ID2D1Brush*>(mutedBrush_.Get());
+            mutedBrush_->SetOpacity(0.85f);
+            DrawEllipsisText(when, D2D1::RectF(textLeft, rowTop, textLeft + timeW - 4.0f * scale, rowTop + rowH),
+                             smallTextFormat_.Get(), whenBrush);
+            textBrush_->SetOpacity(0.94f);
+            DrawEllipsisText(e.title, D2D1::RectF(textLeft + timeW, rowTop, rect.right - padX, rowTop + rowH),
+                             smallTextFormat_.Get(), textBrush_.Get());
+
+            y += rowH;
+            end = i + 1;
+        }
+
+        // Foot line: "+N more" while rows remain, "back to top" on the last page.
+        const bool more = end < rows.size();
+        if (more || start > 0) {
+            std::wstring foot;
+            if (more) {
+                wchar_t buf[48] = {};
+                swprintf_s(buf, Loc(L"+%d more"), static_cast<int>(rows.size() - end));
+                foot = std::wstring(buf) + L" \u25BE";
+                g_apptNextPageStart.store(static_cast<int>(end), std::memory_order_relaxed);
+            } else {
+                foot = std::wstring(L"\u25B4 ") + Loc(L"Back to top");
+                g_apptNextPageStart.store(0, std::memory_order_relaxed);
+            }
+
+            const D2D1_RECT_F footRect = D2D1::RectF(rect.left + padX, y + 1.0f * scale,
+                                                     rect.right - padX, y + 1.0f * scale + moreH);
+            const bool hovered = g_hoveredApptMore.load(std::memory_order_relaxed);
+            if (hovered) DrawCard(footRect, 7.0f * scale);
+            mutedBrush_->SetOpacity(hovered ? 0.98f : 0.78f);
+            smallTextFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+            DrawEllipsisText(foot, footRect, smallTextFormat_.Get(), mutedBrush_.Get());
+            smallTextFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+
+            // Published in content space for the click and hover tests.
+            g_apptMoreL.store((footRect.left - rect.left) / scale, std::memory_order_relaxed);
+            g_apptMoreR.store((footRect.right - rect.left) / scale, std::memory_order_relaxed);
+            g_apptMoreT.store((footRect.top - 3.0f * scale - rect.top) / scale, std::memory_order_relaxed);
+            g_apptMoreB.store((footRect.bottom + 3.0f * scale - rect.top) / scale, std::memory_order_relaxed);
+            g_apptMoreValid.store(true, std::memory_order_relaxed);
+        }
+        textBrush_->SetOpacity(0.96f);
+        mutedBrush_->SetOpacity(0.75f);
+    }
+
+    // "● in 2h 15m · 14:30 · Standup", centred, title trimmed with an ellipsis.
+    void DrawNextAppointmentLine(const AppointmentInfo& appt, const Settings& settings,
+                                 D2D1_RECT_F rect, float scale, float top) {
+        IDWriteTextFormat* fmt = smallTextFormat_ ? smallTextFormat_.Get() : textFormat_.Get();
+        if (!fmt || !dwriteFactory_ || !mutedBrush_) return;
+
+        const SYSTEMTIME startLocal = ApptNaiveToSystemTime(SystemUtcToLocalNaive(appt.startUtc));
+        const std::wstring when = FormatIslandTime(startLocal, settings.clockFollowSystem,
+                                                   settings.use24HourClock, false);
+        const std::wstring text = ApptUtf8ToWide(ics::RelativeText(appt.secsUntil)) +
+                                  L" \u00B7 " + when + L" \u00B7 " + appt.title;
+
+        const float lineH = 16.0f * scale;
+        const float dotD = 7.0f * scale;
+        const float gap = 7.0f * scale;
+        const float maxW = (rect.right - rect.left) - 2.0f * 30.0f * scale - dotD - gap;
+        if (maxW <= 20.0f) return;
+
+        ComPtr<IDWriteTextLayout> layout;
+        if (FAILED(dwriteFactory_->CreateTextLayout(text.c_str(), static_cast<UINT32>(text.size()), fmt,
+                                                    maxW, lineH, &layout)) || !layout) {
+            return;
+        }
+        layout->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+        ComPtr<IDWriteInlineObject> ellipsis;
+        if (SUCCEEDED(dwriteFactory_->CreateEllipsisTrimmingSign(layout.Get(), &ellipsis)) && ellipsis) {
+            const DWRITE_TRIMMING trimming = {DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0};
+            layout->SetTrimming(&trimming, ellipsis.Get());
+        }
+        DWRITE_TEXT_METRICS tm = {};
+        layout->GetMetrics(&tm);
+
+        const float textW = std::min(tm.width, maxW);
+        const float totalW = dotD + gap + textW;
+        const float x0 = (rect.left + rect.right) * 0.5f - totalW * 0.5f;
+
+        ComPtr<ID2D1SolidColorBrush> dot;
+        target_->CreateSolidColorBrush(D2D1::ColorF(appt.color, 0.95f * settingsOpacity_), &dot);
+        if (dot) {
+            target_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(x0 + dotD * 0.5f, top + lineH * 0.5f),
+                                               dotD * 0.5f, dotD * 0.5f), dot.Get());
+        }
+        mutedBrush_->SetOpacity(0.92f);
+        target_->DrawTextLayout(D2D1::Point2F(x0 + dotD + gap, top + (lineH - tm.height) * 0.5f),
+                                layout.Get(), mutedBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_NONE);
+        mutedBrush_->SetOpacity(0.75f);
+    }
+
     void DrawTimeDashboard(const SharedState& state, D2D1_RECT_F rect, const Settings& settings, double now, float scale, SYSTEMTIME& local) {
         (void)now;
 
+        AppointmentInfo nextAppt;
+        const bool hasNextAppt = GetNextAppointment(state, settings, nextAppt);
+
         const float cx = (rect.left + rect.right) * 0.5f;
-        const float cy = (rect.top + rect.bottom) * 0.5f;
+        // With an appointment line underneath, lift the clock/date block a little
+        // so the whole group stays centred and clear of the privacy badge.
+        const float cy = (rect.top + rect.bottom) * 0.5f - (hasNextAppt ? 12.0f * scale : 0.0f);
 
         if (settings.clockAccentGlow) {
             D2D1_COLOR_F accentColor = accentBrush_ ? accentBrush_->GetColor() : D2D1::ColorF(0x4cc9f0);
@@ -16348,6 +17670,10 @@ class Renderer {
                                subRect, mutedBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_NONE);
         }
         textBrush_->SetOpacity(0.98f);
+
+        if (hasNextAppt) {
+            DrawNextAppointmentLine(nextAppt, settings, rect, scale, cy + 47.0f * scale);
+        }
 
         const bool micActive = state.system.micActive && settings.privacyDots && settings.privacyDotsMic;
         const bool camActive = state.system.cameraActive && settings.privacyDots && settings.privacyDotsCam;
@@ -16530,6 +17856,11 @@ class Renderer {
                                IdleStripLayout::kDividerWidth) * scale +
                               idleMetrics.weatherWidth;
             }
+            if (idleMetrics.hasAppt) {
+                blockWidth += (IdleStripLayout::kSlotGap * 2.0f +
+                               IdleStripLayout::kDividerWidth) * scale +
+                              idleMetrics.apptWidth;
+            }
 
             // Centre the block in whatever room the pill currently has. Mid-spring
             // the rect is wider or narrower than the natural width, and clamping
@@ -16572,6 +17903,31 @@ class Renderer {
                     D2D1::RectF(slotX, rect.top, slotX + idleMetrics.weatherWidth, rect.bottom);
                 target_->DrawTextW(weatherLabel, static_cast<UINT32>(wcslen(weatherLabel)), idleFmt,
                                    wRect, textBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
+                slotX += idleMetrics.weatherWidth;
+            }
+
+            if (idleMetrics.hasAppt) {
+                slotX += IdleStripLayout::kSlotGap * scale;
+
+                ComPtr<ID2D1SolidColorBrush> apptDivider;
+                target_->CreateSolidColorBrush(
+                    WithAlpha(material_.hairline, material_.hairline.a * settingsOpacity_),
+                    &apptDivider);
+                if (apptDivider) {
+                    const float divW = IdleStripLayout::kDividerWidth * scale;
+                    const float divTop = rect.top + IdleStripLayout::kDividerInsetY * scale;
+                    const float divBottom = rect.bottom - IdleStripLayout::kDividerInsetY * scale;
+                    target_->FillRoundedRectangle(
+                        D2D1::RoundedRect(D2D1::RectF(slotX, divTop, slotX + divW, divBottom),
+                                          divW * 0.5f, divW * 0.5f), apptDivider.Get());
+                }
+                slotX += (IdleStripLayout::kDividerWidth + IdleStripLayout::kSlotGap) * scale;
+
+                const D2D1_RECT_F aRect =
+                    D2D1::RectF(slotX, rect.top, slotX + idleMetrics.apptWidth, rect.bottom);
+                target_->DrawTextW(idleMetrics.apptLabel.c_str(),
+                                   static_cast<UINT32>(idleMetrics.apptLabel.size()), idleFmt,
+                                   aRect, textBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
             }
             textBrush_->SetOpacity(1.0f);
 
@@ -16592,6 +17948,7 @@ class Renderer {
             std::vector<int> activeTabs;
             activeTabs.push_back(3); // Time (shown first when the island expands/on hover)
             activeTabs.push_back(0); // Calendar
+            if (AppointmentsTabEnabled(settings)) activeTabs.push_back(6); // Appointments
             if (settings.weather) activeTabs.push_back(1);
             if (settings.hardwareMonitorModule) activeTabs.push_back(2);
             if (settings.fileTrayModule) activeTabs.push_back(4);
@@ -16612,6 +17969,7 @@ class Renderer {
             DrawTabTransition(1, tabIdx, activeTabs, fullRect, now, [&](int activeTabId) {
                 if (activeTabId == 3) DrawTimeDashboard(state, fullRect, settings, now, scale, local);
                 else if (activeTabId == 0) DrawCalendarDashboard(state, fullRect, settings, now, scale, local);
+                else if (activeTabId == 6) DrawAppointmentsDashboard(state, fullRect, settings, scale);
                 else if (activeTabId == 1) DrawWeatherDashboard(state, fullRect, settings, now, scale, hasWeather, wIcon, wText);
                 else if (activeTabId == 2) DrawHardwareMonitorDashboard(state, fullRect, settings, scale);
                 else if (activeTabId == 4) DrawFileTrayDashboard(state, fullRect, settings, scale);
@@ -16626,6 +17984,7 @@ class Renderer {
 
         if (expandedAlpha <= 0.01f && !g_trayDragOver.load(std::memory_order_relaxed)) {
             g_idleTab = 0;
+            g_apptPageStart = 0;
             ResetTabTransition();
         }
 
@@ -17164,6 +18523,7 @@ class Renderer {
             if (lyricsFirst) activeTabs.push_back(5);  // Lyrics (pinned first)
             activeTabs.push_back(0); // Media
             activeTabs.push_back(1); // Calendar
+            if (AppointmentsTabEnabled(settings)) activeTabs.push_back(6); // Appointments
             if (settings.weather) activeTabs.push_back(2);
             if (settings.hardwareMonitorModule) activeTabs.push_back(3);
             if (settings.fileTrayModule) activeTabs.push_back(4);
@@ -17404,6 +18764,8 @@ class Renderer {
             } else if (activeTabId == 1) {
                 SYSTEMTIME local = {}; GetLocalTime(&local);
                 DrawCalendarDashboard(state, rect, settings, now, 1.0f, local);
+            } else if (activeTabId == 6) {
+                DrawAppointmentsDashboard(state, rect, settings, 1.0f);
             } else if (activeTabId == 2) {
                 bool hasWeather = state.weather.hasData && (now - state.weather.lastUpdated < 3600.0);
                 std::wstring wIcon = L"🌡️"; std::wstring wText = Loc(L"Loading...");
@@ -17440,6 +18802,7 @@ class Renderer {
         // Collapsed UI
         if (collapsedAlpha > 0.01f && mask && layer && !g_trayDragOver.load(std::memory_order_relaxed)) {
             g_idleTab = 0;
+            g_apptPageStart = 0;
             ResetTabTransition();
             target_->PushLayer(D2D1::LayerParameters(rect, mask.Get(), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1::IdentityMatrix(), collapsedAlpha, nullptr, D2D1_LAYER_OPTIONS_NONE), layer);;
 
@@ -23797,6 +25160,13 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     }
                 }
 
+                // The Appointments "+N more" line is clickable.
+                if (AppointmentsTabEnabled(g_settings) && currentTab == AppointmentsTabIndex(g_settings) &&
+                    g_hoveredApptMore.load(std::memory_order_relaxed)) {
+                    SetCursor(LoadCursorW(nullptr, IDC_HAND));
+                    return TRUE;
+                }
+
                 // A File Tray row under the cursor is clickable (opens the file).
                 if (g_settings.fileTrayModule && currentTab == FileTrayTabIndex(g_settings) &&
                     (g_hoveredFileTrayRow.load(std::memory_order_relaxed) >= 0 ||
@@ -23974,6 +25344,13 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     hoveredAction = hoveredRow;
                 }
             }
+            bool apptHover = false;
+            if (AppointmentsTabEnabled(g_settings) && currentTab == AppointmentsTabIndex(g_settings)) {
+                apptHover = ApptMoreHitTest(MediaContentFromClient(xPos, yPos));
+            }
+            if (g_hoveredApptMore.exchange(apptHover) != apptHover) {
+                g_layoutDirty = true;
+            }
             bool trayHoverChanged = false;
             if (g_hoveredFileTrayRow.exchange(hoveredRow) != hoveredRow) {
                 trayHoverChanged = true;
@@ -24011,6 +25388,9 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 g_layoutDirty = true;
             }
             s_trayPressActive = false;
+            if (g_hoveredApptMore.exchange(false)) {
+                g_layoutDirty = true;
+            }
             if (g_hoveredFileTrayRow.exchange(-1) != -1) {
                 g_layoutDirty = true;
             }
@@ -24141,6 +25521,15 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 const int currentTab = NormalizedTabIndex(g_settings);
 
                 const MediaContentPoint cp = MediaContentFromClient(xPos, yPos);
+
+                // Appointments tab: the "+N more" line shows the next page.
+                if (AppointmentsTabEnabled(g_settings) && currentTab == AppointmentsTabIndex(g_settings) &&
+                    ApptMoreHitTest(cp)) {
+                    g_apptPageStart = g_apptNextPageStart.load(std::memory_order_relaxed);
+                    g_hoveredApptMore = false;
+                    g_layoutDirty = true;
+                    return 0;
+                }
 
                 // File Tray: the bin clears the shelf, the cut button removes one file,
                 // and a plain click on a row opens it with its default app. (Dragging a
@@ -25577,6 +26966,7 @@ bool StartThreads() {
     g_stopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     g_settingsChangedEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     g_mediaRefreshEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    g_calendarRefreshEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     if (!g_stopEvent || !g_settingsChangedEvent) {
         return false;
     }
@@ -25590,6 +26980,7 @@ bool StartThreads() {
     g_mediaThread = CreateThread(nullptr, 0, MediaThreadProc, nullptr, 0, nullptr);
     g_audioThread = CreateThread(nullptr, 0, AudioThreadProc, nullptr, 0, nullptr);
     g_weatherThread = CreateThread(nullptr, 0, WeatherThreadProc, nullptr, 0, nullptr);
+    g_calendarThread = CreateThread(nullptr, 0, CalendarThreadProc, nullptr, 0, nullptr);
     g_lyricsThread = CreateThread(nullptr, 0, LyricsThreadProc, nullptr, 0, nullptr);
     g_keyboardThread = CreateThread(nullptr, 0, KeyboardThreadProc, nullptr, 0, &g_keyboardThreadId);
     g_mouseThread = CreateThread(nullptr, 0, MouseThreadProc, nullptr, 0, &g_mouseThreadId);
@@ -25614,7 +27005,7 @@ void StopThreads() {
         SetEvent(g_stopEvent);
     }
 
-    HANDLE handles[] = {g_renderThread, g_mediaThread, g_audioThread, g_weatherThread, g_lyricsThread, g_notificationThread, g_keyboardThread, g_mouseThread, g_bluetoothThread};
+    HANDLE handles[] = {g_renderThread, g_mediaThread, g_audioThread, g_weatherThread, g_calendarThread, g_lyricsThread, g_notificationThread, g_keyboardThread, g_mouseThread, g_bluetoothThread};
     for (HANDLE handle : handles) {
         if (handle) {
             WaitForSingleObject(handle, 3000);
@@ -25626,6 +27017,7 @@ void StopThreads() {
     g_mediaThread = nullptr;
     g_audioThread = nullptr;
     g_weatherThread = nullptr;
+    g_calendarThread = nullptr;
     g_lyricsThread = nullptr;
     g_notificationThread = nullptr;
     g_keyboardThread = nullptr;
@@ -25645,6 +27037,10 @@ void StopThreads() {
     if (g_mediaRefreshEvent) {
         CloseHandle(g_mediaRefreshEvent);
         g_mediaRefreshEvent = nullptr;
+    }
+    if (g_calendarRefreshEvent) {
+        CloseHandle(g_calendarRefreshEvent);
+        g_calendarRefreshEvent = nullptr;
     }
 
     g_running = false;

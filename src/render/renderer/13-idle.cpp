@@ -96,6 +96,11 @@
                                IdleStripLayout::kDividerWidth) * scale +
                               idleMetrics.weatherWidth;
             }
+            if (idleMetrics.hasAppt) {
+                blockWidth += (IdleStripLayout::kSlotGap * 2.0f +
+                               IdleStripLayout::kDividerWidth) * scale +
+                              idleMetrics.apptWidth;
+            }
 
             // Centre the block in whatever room the pill currently has. Mid-spring
             // the rect is wider or narrower than the natural width, and clamping
@@ -138,6 +143,31 @@
                     D2D1::RectF(slotX, rect.top, slotX + idleMetrics.weatherWidth, rect.bottom);
                 target_->DrawTextW(weatherLabel, static_cast<UINT32>(wcslen(weatherLabel)), idleFmt,
                                    wRect, textBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
+                slotX += idleMetrics.weatherWidth;
+            }
+
+            if (idleMetrics.hasAppt) {
+                slotX += IdleStripLayout::kSlotGap * scale;
+
+                ComPtr<ID2D1SolidColorBrush> apptDivider;
+                target_->CreateSolidColorBrush(
+                    WithAlpha(material_.hairline, material_.hairline.a * settingsOpacity_),
+                    &apptDivider);
+                if (apptDivider) {
+                    const float divW = IdleStripLayout::kDividerWidth * scale;
+                    const float divTop = rect.top + IdleStripLayout::kDividerInsetY * scale;
+                    const float divBottom = rect.bottom - IdleStripLayout::kDividerInsetY * scale;
+                    target_->FillRoundedRectangle(
+                        D2D1::RoundedRect(D2D1::RectF(slotX, divTop, slotX + divW, divBottom),
+                                          divW * 0.5f, divW * 0.5f), apptDivider.Get());
+                }
+                slotX += (IdleStripLayout::kDividerWidth + IdleStripLayout::kSlotGap) * scale;
+
+                const D2D1_RECT_F aRect =
+                    D2D1::RectF(slotX, rect.top, slotX + idleMetrics.apptWidth, rect.bottom);
+                target_->DrawTextW(idleMetrics.apptLabel.c_str(),
+                                   static_cast<UINT32>(idleMetrics.apptLabel.size()), idleFmt,
+                                   aRect, textBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
             }
             textBrush_->SetOpacity(1.0f);
 
@@ -158,6 +188,7 @@
             std::vector<int> activeTabs;
             activeTabs.push_back(3); // Time (shown first when the island expands/on hover)
             activeTabs.push_back(0); // Calendar
+            if (AppointmentsTabEnabled(settings)) activeTabs.push_back(6); // Appointments
             if (settings.weather) activeTabs.push_back(1);
             if (settings.hardwareMonitorModule) activeTabs.push_back(2);
             if (settings.fileTrayModule) activeTabs.push_back(4);
@@ -178,6 +209,7 @@
             DrawTabTransition(1, tabIdx, activeTabs, fullRect, now, [&](int activeTabId) {
                 if (activeTabId == 3) DrawTimeDashboard(state, fullRect, settings, now, scale, local);
                 else if (activeTabId == 0) DrawCalendarDashboard(state, fullRect, settings, now, scale, local);
+                else if (activeTabId == 6) DrawAppointmentsDashboard(state, fullRect, settings, scale);
                 else if (activeTabId == 1) DrawWeatherDashboard(state, fullRect, settings, now, scale, hasWeather, wIcon, wText);
                 else if (activeTabId == 2) DrawHardwareMonitorDashboard(state, fullRect, settings, scale);
                 else if (activeTabId == 4) DrawFileTrayDashboard(state, fullRect, settings, scale);
@@ -192,6 +224,7 @@
 
         if (expandedAlpha <= 0.01f && !g_trayDragOver.load(std::memory_order_relaxed)) {
             g_idleTab = 0;
+            g_apptPageStart = 0;
             ResetTabTransition();
         }
 
