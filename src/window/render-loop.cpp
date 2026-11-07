@@ -452,6 +452,13 @@ DWORD WINAPI RenderThreadProc(void*) {
             lastInteractionTime = now;
         }
 
+        // A paused player comes back while the island is open (see MediaVisible).
+        // The activities for this frame are already chosen, so the switch happens
+        // on the next one.
+        if (g_islandOpen.exchange(isHoverExpanded || pinned) != (isHoverExpanded || pinned)) {
+            g_layoutDirty = true;
+        }
+
         bool isHidden = false;
         if (!unhideGraceActive) {
             if (g_settings.autoHideIdleSeconds == -1 && !isTransientAlert && !isHoverExpanded && !hoverUnhides && !pinned) {

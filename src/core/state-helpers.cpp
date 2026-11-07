@@ -13,22 +13,42 @@ double NowSeconds() {
 // make the island flap to the clock and back. Every place that asks "is the media
 // view up?" goes through here, so clicks, tabs and lyrics all agree with what is
 // actually drawn (a click on the idle clock must never hit the player's controls).
+//
+// A paused session is only hidden from the collapsed island: while the island is
+// open (hover, click or pinned) the player is still there, so playback can be
+// resumed. Its X button (MediaDismissHitTest) dismisses the paused session for
+// good, until it plays again.
 constexpr double kMediaPauseGraceSeconds = 2.5;
 std::atomic<double> g_mediaLastPlayingAt{-1e9};
+std::atomic<bool> g_islandOpen{false};           // last frame: hover-expanded or pinned (render loop)
+std::atomic<uint64_t> g_mediaDismissedKey{0};    // MediaSessionKey of the dismissed paused session, 0 = none
+
+// Identifies "this paused track in this app", so a dismissal does not stick to
+// the next song or to another player.
+uint64_t MediaSessionKey(const MediaSnapshot& media) {
+    const std::wstring id = media.sourceAppUserModelId + L'\n' + media.title + L'\n' + media.artist;
+    return static_cast<uint64_t>(std::hash<std::wstring>{}(id)) | 1ull;  // never 0
+}
 
 bool MediaVisible(const SharedState& state, const Settings& settings) {
     if (!settings.media || !state.media.available) {
         return false;
     }
-    if (!settings.mediaPausedShowsClock) {
-        return true;
-    }
     const double now = NowSeconds();
     if (state.media.playing) {
         g_mediaLastPlayingAt.store(now, std::memory_order_relaxed);
+        g_mediaDismissedKey.store(0, std::memory_order_relaxed);  // playing again: back for good
         return true;
     }
-    return now - g_mediaLastPlayingAt.load(std::memory_order_relaxed) < kMediaPauseGraceSeconds;
+    const uint64_t dismissed = g_mediaDismissedKey.load(std::memory_order_relaxed);
+    if (dismissed != 0 && dismissed == MediaSessionKey(state.media)) {
+        return false;
+    }
+    if (!settings.mediaPausedShowsClock) {
+        return true;
+    }
+    return now - g_mediaLastPlayingAt.load(std::memory_order_relaxed) < kMediaPauseGraceSeconds ||
+           g_islandOpen.load(std::memory_order_relaxed);
 }
 
 float Clamp(float v, float lo, float hi) {

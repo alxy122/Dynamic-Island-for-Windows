@@ -61,6 +61,25 @@
         if (began) target_->PopLayer();
     }
 
+    // Small round X in the top right corner of a paused player (MediaDismissHitTest).
+    void DrawMediaDismissButton(D2D1_RECT_F rect) {
+        if (!EnsureRoundJoinStyle()) return;
+        const float r = MediaLayout::kDismissRadius;
+        const D2D1_POINT_2F c = D2D1::Point2F(rect.right - MediaLayout::kDismissInsetRight,
+                                              rect.top + MediaLayout::kDismissY);
+        const bool hovered = g_hoveredMediaDismiss.load(std::memory_order_relaxed);
+        if (ID2D1SolidColorBrush* bg = AcquireBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, hovered ? 0.14f : 0.06f))) {
+            target_->FillEllipse(D2D1::Ellipse(c, r, r), bg);
+        }
+        const float arm = 3.6f;
+        textBrush_->SetOpacity(hovered ? 0.95f : 0.62f);
+        target_->DrawLine(D2D1::Point2F(c.x - arm, c.y - arm), D2D1::Point2F(c.x + arm, c.y + arm),
+                          textBrush_.Get(), 1.5f, roundJoinStyle_.Get());
+        target_->DrawLine(D2D1::Point2F(c.x - arm, c.y + arm), D2D1::Point2F(c.x + arm, c.y - arm),
+                          textBrush_.Get(), 1.5f, roundJoinStyle_.Get());
+        textBrush_->SetOpacity(1.0f);
+    }
+
     // Speech-bubble button. Lights up in the accent colour while the lyrics view is open.
     void DrawImmersiveLyricsButton(D2D1_RECT_F rect, float mix) {
         if (!EnsureRoundJoinStyle()) return;

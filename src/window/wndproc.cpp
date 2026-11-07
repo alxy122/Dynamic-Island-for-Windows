@@ -276,7 +276,8 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                                                MediaTransportHitTest(cp) != -1 ||
                                                MediaScrubFractionFromContent(cp) >= 0.0f ||
                                                g_hoveredSourceSlot.load(std::memory_order_relaxed) >= 0 ||
-                                               (g_settings.mediaTabLyrics && MediaLyricsButtonHitTest(cp));
+                                               (g_settings.mediaTabLyrics && MediaLyricsButtonHitTest(cp)) ||
+                                               g_hoveredMediaDismiss.load(std::memory_order_relaxed);
                     if (hoverClickable) {
                         SetCursor(LoadCursorW(nullptr, IDC_HAND));
                         return TRUE;
@@ -408,11 +409,21 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
             int hovered = -1;
             bool mediaActive = false;
+            bool mediaPaused = false;
             {
                 std::lock_guard lock(g_stateMutex);
                 mediaActive = MediaVisible(g_state, g_settings);
+                mediaPaused = !g_state.media.playing;
             }
             const int currentTab = NormalizedTabIndex(g_settings);
+
+            {
+                const bool onDismiss = mediaActive && mediaPaused && currentTab == MediaTabIndex(g_settings) &&
+                                       MediaDismissHitTest(MediaContentFromClient(xPos, yPos));
+                if (g_hoveredMediaDismiss.exchange(onDismiss) != onDismiss) {
+                    g_layoutDirty = true;
+                }
+            }
 
             int hoveredSlot = -1;
             if (mediaActive && currentTab == MediaTabIndex(g_settings)) {
@@ -496,6 +507,9 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             if (g_hoveredLyricsBtn.exchange(false)) {
                 g_layoutDirty = true;
             }
+            if (g_hoveredMediaDismiss.exchange(false)) {
+                g_layoutDirty = true;
+            }
             s_trayPressActive = false;
             if (g_hoveredFileTrayRow.exchange(-1) != -1) {
                 g_layoutDirty = true;
@@ -575,10 +589,14 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     return 0;
                 }
                 std::vector<IslandKind> kinds;
+                bool mediaPaused = false;
+                uint64_t mediaKey = 0;
                 {
                     std::lock_guard lock(g_stateMutex);
                     mediaActive = MediaVisible(g_state, g_settings);
                     kinds = ChooseActivities(g_state, g_settings, NowSeconds());
+                    mediaPaused = !g_state.media.playing;
+                    mediaKey = MediaSessionKey(g_state.media);
                 }
 
                 // Song recognition card: open the track when found, otherwise dismiss / cancel.
@@ -711,6 +729,14 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 }
 
                 if (mediaActive && currentTab == MediaTabIndex(g_settings)) {
+                    // X of a paused player: dismiss this session until it plays again.
+                    if (mediaPaused && MediaDismissHitTest(cp)) {
+                        g_mediaDismissedKey.store(mediaKey, std::memory_order_relaxed);
+                        g_hoveredMediaDismiss = false;
+                        g_layoutDirty = true;
+                        return 0;
+                    }
+
                     // Source dock: "+N" opens the list, another slot switches to it.
                     {
                         const DockHit dock = ResolveSourceDockHit(cp);

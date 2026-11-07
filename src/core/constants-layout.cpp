@@ -63,6 +63,13 @@ namespace MediaLayout {
     // this height is still the collapsed pill and must not be hit-tested.
     constexpr float kExpandedMinHeight = 60.0f;
 
+    // X button of a paused player (top right, above the sound waves): dismisses
+    // the paused session until it plays again. Draw code and hit test share these.
+    constexpr float kDismissInsetRight = 40.0f;  // button centre from the right edge
+    constexpr float kDismissY = 22.0f;           // button centre from the top edge
+    constexpr float kDismissRadius = 10.0f;
+    constexpr float kDismissHitPad = 5.0f;
+
     // ── Source dock ──────────────────────────────────────────────────────────
     // Widest layout is 3 slots = 86px, so it ends at x=106, clear of the prev
     // button (~110). Draw code and hit test both read these.
@@ -127,6 +134,7 @@ namespace ImmersiveLayout {
 }
 std::atomic<bool> g_immersiveLyrics{false};   // lyrics view requested
 std::atomic<bool> g_hoveredLyricsBtn{false};
+std::atomic<bool> g_hoveredMediaDismiss{false};  // cursor on the paused player's X button
 std::atomic<float> g_immersiveMixPub{0.0f};   // eased 0..1 mix, published by DrawMedia for hit tests
 
 // Layout for the File Tray card (#33). Shared by DrawFileTrayDashboard and the

@@ -169,6 +169,11 @@
                                      immersiveMix < 0.01f);
                 }
 
+                // Paused: an X to dismiss the session (it returns once it plays again).
+                if (!state.media.playing && immersiveMix < 0.01f) {
+                    DrawMediaDismissButton(rect);
+                }
+
                 // Immersive: title / artist / spectrum / source line cross-fade out.
                 const bool normalFaded = BeginImmersiveFade(1.0f - immersiveMix);
                 if (immersiveMix < 0.999f) {
